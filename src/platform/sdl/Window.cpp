@@ -26,7 +26,14 @@ bool Window::InitSdl() {
     SDL_SetHint(SDL_HINT_JOYSTICK_RAWINPUT, "0");
     SDL_SetHint(SDL_HINT_XINPUT_ENABLED, "1");
 #endif
+#ifdef __ANDROID__
+    // Horizon OS 2D panels can report onWindowFocusChanged(false) while still active in the headset, and B/Back
+    // button presses should route to the game rather than dismissing the activity.
+    SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
+    SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");
+#else
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "0");
+#endif
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD)) {
         std::fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
         return false;

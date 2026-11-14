@@ -138,6 +138,13 @@ void Gamepads::Update(bool trackChanges, input::InputSystem* system) {
             if (!d.pads[port]) continue;
             d.ids[port] = ids[i];
             d.motors[port][0] = d.motors[port][1] = 0;
+#ifdef __ANDROID__
+            char* mapping = SDL_GetGamepadMapping(d.pads[port]);
+            SDL_Log("Opened gamepad port %u: '%s' mapping='%s'",
+                    port, SDL_GetGamepadName(d.pads[port]) ? SDL_GetGamepadName(d.pads[port]) : "",
+                    mapping ? mapping : "");
+            SDL_free(mapping);
+#endif
         }
         present[port] = true;
     }
