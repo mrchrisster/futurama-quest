@@ -26,7 +26,12 @@ public:
     void SetRenderScale(double factor);
     double RenderScale() const;
     using PresentCallback = std::function<void(const void* rgba, u32 width, u32 height)>;
+    using StereoPresentCallback =
+        std::function<void(const void* leftRgba, const void* rightRgba, u32 eyeWidth, u32 eyeHeight)>;
     void SetPresentCallback(PresentCallback cb);
+    void SetStereoPresentCallback(StereoPresentCallback cb);
+    void SetStereo(bool enabled, f32 strength = 0.022f, f32 focus = 12.0f);
+    bool StereoEnabled() const;
     u32 draws() const { return draws_; }
 
     void Clear(u32 count, const D3DRECT* rects, u32 flags, u32 color, f32 z, u32 stencil) override;

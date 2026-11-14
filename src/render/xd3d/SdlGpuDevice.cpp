@@ -40,6 +40,7 @@ struct DrawCB {
     s32 tci[4][4], colorOp[4][4], alphaOp[4][4], stageMisc[4][4], lightCount[4];
     LightCB lights[8];
     f32 texScale[4][4];
+    f32 stereo[4];
 };
 struct ClearCB {
     f32 rect[4], color[4], z[4];
@@ -185,6 +186,10 @@ struct SdlGpuDevice::Impl {
     SDL_GPUTransferBuffer* downloadBuf = nullptr;
     u32 downloadCapacity = 0;
     PresentCallback onPresent;
+    StereoPresentCallback onPresentStereo;
+    bool stereoEnabled = false;
+    f32 stereoStrength = 0.022f;
+    f32 stereoFocus = 12.0f;
 
     u32 windowWidth = 0;
     u32 windowHeight = 0;
@@ -199,6 +204,8 @@ struct SdlGpuDevice::Impl {
     struct Target {
         SDL_GPUTexture* tex = nullptr;
         SDL_GPUTexture* multisample = nullptr;
+        SDL_GPUTexture* rightTex = nullptr;
+        SDL_GPUTexture* rightMultisample = nullptr;
         u32 width = 0, height = 0;
         u32 physicalWidth = 0, physicalHeight = 0;
         u32 samples = 1;
@@ -220,6 +227,7 @@ struct SdlGpuDevice::Impl {
 
     struct DrawItem {
         bool isClearQuad = false;
+        bool isStereoWorld = false;
         // Draw fields
         SDL_GPUGraphicsPipeline* pipeline = nullptr;
         SDL_GPUViewport viewport{};
@@ -256,6 +264,8 @@ struct SdlGpuDevice::Impl {
     std::vector<u32> scratchIdx;
 
     static u32 Physical(u32 logical, double scale) { return std::max(u32(std::lround(logical * scale)), 1u); }
+    void ReleaseTargetTextures(Target& t);
+    bool EnsureStereoTargets();
     bool MakeTarget(const Resource* key, bool depth, Target& t, u32 samples = 0);
     void ApplyScale(double sx, double sy);
     Target* ColorTarget(Resource* r);
@@ -361,6 +371,14 @@ bool SdlGpuDevice::Impl::UploadTextureData(SDL_GPUTexture* tex, u32 width, u32 h
     return SDL_SubmitGPUCommandBuffer(cmd);
 }
 
+void SdlGpuDevice::Impl::ReleaseTargetTextures(Target& t) {
+    if (t.tex) SDL_ReleaseGPUTexture(gpu, t.tex);
+    if (t.multisample) SDL_ReleaseGPUTexture(gpu, t.multisample);
+    if (t.rightTex) SDL_ReleaseGPUTexture(gpu, t.rightTex);
+    if (t.rightMultisample) SDL_ReleaseGPUTexture(gpu, t.rightMultisample);
+    t.tex = t.multisample = t.rightTex = t.rightMultisample = nullptr;
+}
+
 bool SdlGpuDevice::Impl::MakeTarget(const Resource* key, bool depth, Target& t, u32 samples) {
     t.depth = depth;
     t.scene = key == (depth ? sceneDepth : sceneColor);
@@ -381,24 +399,87 @@ bool SdlGpuDevice::Impl::MakeTarget(const Resource* key, bool depth, Target& t, 
         ti.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
         ti.sample_count = sc;
         t.tex = SDL_CreateGPUTexture(gpu, &ti);
-        return t.tex != nullptr;
+        if (!t.tex) return false;
+        if (stereoEnabled && t.scene) {
+            t.rightTex = SDL_CreateGPUTexture(gpu, &ti);
+            if (!t.rightTex) {
+                ReleaseTargetTextures(t);
+                return false;
+            }
+        }
+        return true;
     }
     ti.format = colorFormat;
     ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
     ti.sample_count = SDL_GPU_SAMPLECOUNT_1;
     t.tex = SDL_CreateGPUTexture(gpu, &ti);
     if (!t.tex) return false;
+    if (stereoEnabled && t.scene) {
+        t.rightTex = SDL_CreateGPUTexture(gpu, &ti);
+        if (!t.rightTex) {
+            ReleaseTargetTextures(t);
+            return false;
+        }
+    }
     if (t.samples > 1) {
         ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
         ti.sample_count = sc;
         t.multisample = SDL_CreateGPUTexture(gpu, &ti);
         if (!t.multisample) {
-            SDL_ReleaseGPUTexture(gpu, t.tex);
-            t.tex = nullptr;
+            ReleaseTargetTextures(t);
             return false;
+        }
+        if (stereoEnabled && t.scene) {
+            t.rightMultisample = SDL_CreateGPUTexture(gpu, &ti);
+            if (!t.rightMultisample) {
+                ReleaseTargetTextures(t);
+                return false;
+            }
         }
     }
     return true;
+}
+
+bool SdlGpuDevice::Impl::EnsureStereoTargets() {
+    if (!gpu || !stereoEnabled) return true;
+    auto ensurePair = [&](const Resource* key, bool depth) -> bool {
+        if (!key) return true;
+        auto it = targets.find(key);
+        if (it == targets.end()) return true;
+        Target& t = it->second;
+        if (t.rightTex) return true;
+        const SDL_GPUSampleCount sc = ToSampleCount(t.samples);
+        SDL_GPUTextureCreateInfo ti = {};
+        ti.type = SDL_GPU_TEXTURETYPE_2D;
+        ti.width = t.physicalWidth;
+        ti.height = t.physicalHeight;
+        ti.layer_count_or_depth = 1;
+        ti.num_levels = 1;
+        if (depth) {
+            ti.format = depthFormat;
+            ti.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
+            ti.sample_count = sc;
+            t.rightTex = SDL_CreateGPUTexture(gpu, &ti);
+            return t.rightTex != nullptr;
+        }
+        ti.format = colorFormat;
+        ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        ti.sample_count = SDL_GPU_SAMPLECOUNT_1;
+        t.rightTex = SDL_CreateGPUTexture(gpu, &ti);
+        if (!t.rightTex) return false;
+        if (t.samples > 1) {
+            ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+            ti.sample_count = sc;
+            t.rightMultisample = SDL_CreateGPUTexture(gpu, &ti);
+            if (!t.rightMultisample) {
+                SDL_ReleaseGPUTexture(gpu, t.rightTex);
+                t.rightTex = nullptr;
+                return false;
+            }
+        }
+        return true;
+    };
+    return ensurePair(sceneColor, false) && ensurePair(sceneDepth, true);
 }
 
 SdlGpuDevice::Impl::Target* SdlGpuDevice::Impl::ColorTarget(Resource* r) {
@@ -456,6 +537,8 @@ void SdlGpuDevice::Impl::ApplyScale(double sx, double sy) {
         }
         if (old.tex) toRelease.push_back(old.tex);
         if (old.multisample) toRelease.push_back(old.multisample);
+        if (old.rightTex) toRelease.push_back(old.rightTex);
+        if (old.rightMultisample) toRelease.push_back(old.rightMultisample);
         old = t;
     }
     if (cmd) SDL_SubmitGPUCommandBuffer(cmd);
@@ -809,56 +892,82 @@ void SdlGpuDevice::Impl::Flush() {
         }
     }
 
-    for (const PassRecord& pass : passes) {
-        if (!pass.ct || !pass.ct->tex) continue;
-        SDL_GPUColorTargetInfo ci = {};
-        ci.load_op = pass.colorLoadOp;
-        ci.clear_color = pass.clearColor;
-        if (pass.ct->multisample) {
-            ci.texture = pass.ct->multisample;
-            ci.resolve_texture = pass.ct->tex;
-            ci.store_op = SDL_GPU_STOREOP_RESOLVE_AND_STORE;
-        } else {
-            ci.texture = pass.ct->tex;
-            ci.store_op = SDL_GPU_STOREOP_STORE;
-        }
+    const bool runStereo = stereoEnabled && EnsureStereoTargets() &&
+                           std::any_of(passes.begin(), passes.end(),
+                                       [](const PassRecord& p) { return p.ct && p.ct->scene && p.ct->rightTex; });
 
-        const bool useDepth = pass.dt && pass.dt->tex && pass.dt->samples == pass.ct->samples;
-        SDL_GPUDepthStencilTargetInfo di = {};
-        if (useDepth) {
-            di.texture = pass.dt->tex;
-            di.load_op = pass.depthLoadOp;
-            di.store_op = SDL_GPU_STOREOP_STORE;
-            di.stencil_load_op = pass.stencilLoadOp;
-            di.stencil_store_op = SDL_GPU_STOREOP_STORE;
-            di.clear_depth = pass.clearDepth;
-            di.clear_stencil = pass.clearStencil;
-        }
+    auto encodeEye = [&](int eye) {
+        for (const PassRecord& pass : passes) {
+            if (!pass.ct || !pass.ct->tex) continue;
+            if (eye > 0 && (!pass.ct->scene || !pass.ct->rightTex)) continue;
 
-        SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ci, 1, useDepth ? &di : nullptr);
-        for (const DrawItem& item : pass.items) {
-            if (!item.pipeline) continue;
-            SDL_BindGPUGraphicsPipeline(rp, item.pipeline);
-            SDL_SetGPUViewport(rp, &item.viewport);
-            if (item.isClearQuad) {
-                SDL_SetGPUStencilReference(rp, item.stencilRef);
-                SDL_PushGPUVertexUniformData(cmd, 0, &item.clearCB, sizeof item.clearCB);
-                SDL_PushGPUFragmentUniformData(cmd, 0, &item.clearCB, sizeof item.clearCB);
-                SDL_DrawGPUPrimitives(rp, 4, 1, 0, 0);
+            SDL_GPUTexture* colorTex = eye > 0 ? pass.ct->rightTex : pass.ct->tex;
+            SDL_GPUTexture* msTex = eye > 0 ? pass.ct->rightMultisample : pass.ct->multisample;
+            SDL_GPUColorTargetInfo ci = {};
+            ci.load_op = pass.colorLoadOp;
+            ci.clear_color = pass.clearColor;
+            if (msTex) {
+                ci.texture = msTex;
+                ci.resolve_texture = colorTex;
+                ci.store_op = SDL_GPU_STOREOP_RESOLVE_AND_STORE;
             } else {
-                SDL_SetGPUBlendConstants(rp, item.blendColor);
-                SDL_SetGPUStencilReference(rp, item.stencilRef);
-                SDL_GPUBufferBinding vbb{vb, item.vertByteOffset};
-                SDL_GPUBufferBinding ibb{ib, item.idxByteOffset};
-                SDL_BindGPUVertexBuffers(rp, 0, &vbb, 1);
-                SDL_BindGPUIndexBuffer(rp, &ibb, SDL_GPU_INDEXELEMENTSIZE_32BIT);
-                SDL_PushGPUVertexUniformData(cmd, 0, &item.drawCB, sizeof item.drawCB);
-                SDL_PushGPUFragmentUniformData(cmd, 0, &item.drawCB, sizeof item.drawCB);
-                SDL_BindGPUFragmentSamplers(rp, 0, item.bindings, 4);
-                SDL_DrawGPUIndexedPrimitives(rp, item.idxCount, 1, 0, 0, 0);
+                ci.texture = colorTex;
+                ci.store_op = SDL_GPU_STOREOP_STORE;
             }
+
+            const bool useDepth = pass.dt && pass.dt->tex && pass.dt->samples == pass.ct->samples;
+            SDL_GPUDepthStencilTargetInfo di = {};
+            if (useDepth) {
+                di.texture = (eye > 0 && pass.dt->rightTex) ? pass.dt->rightTex : pass.dt->tex;
+                di.load_op = pass.depthLoadOp;
+                di.store_op = SDL_GPU_STOREOP_STORE;
+                di.stencil_load_op = pass.stencilLoadOp;
+                di.stencil_store_op = SDL_GPU_STOREOP_STORE;
+                di.clear_depth = pass.clearDepth;
+                di.clear_stencil = pass.clearStencil;
+            }
+
+            SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ci, 1, useDepth ? &di : nullptr);
+            for (const DrawItem& item : pass.items) {
+                if (!item.pipeline) continue;
+                SDL_BindGPUGraphicsPipeline(rp, item.pipeline);
+                SDL_SetGPUViewport(rp, &item.viewport);
+                if (item.isClearQuad) {
+                    SDL_SetGPUStencilReference(rp, item.stencilRef);
+                    SDL_PushGPUVertexUniformData(cmd, 0, &item.clearCB, sizeof item.clearCB);
+                    SDL_PushGPUFragmentUniformData(cmd, 0, &item.clearCB, sizeof item.clearCB);
+                    SDL_DrawGPUPrimitives(rp, 4, 1, 0, 0);
+                } else {
+                    SDL_SetGPUBlendConstants(rp, item.blendColor);
+                    SDL_SetGPUStencilReference(rp, item.stencilRef);
+                    SDL_GPUBufferBinding vbb{vb, item.vertByteOffset};
+                    SDL_GPUBufferBinding ibb{ib, item.idxByteOffset};
+                    SDL_BindGPUVertexBuffers(rp, 0, &vbb, 1);
+                    SDL_BindGPUIndexBuffer(rp, &ibb, SDL_GPU_INDEXELEMENTSIZE_32BIT);
+                    if (eye != 0 && item.isStereoWorld) {
+                        DrawCB cb = item.drawCB;
+                        cb.stereo[0] = f32(eye) * stereoStrength;
+                        cb.stereo[1] = stereoFocus;
+                        cb.stereo[2] = 1.0f;
+                        SDL_PushGPUVertexUniformData(cmd, 0, &cb, sizeof cb);
+                        SDL_PushGPUFragmentUniformData(cmd, 0, &cb, sizeof cb);
+                    } else {
+                        SDL_PushGPUVertexUniformData(cmd, 0, &item.drawCB, sizeof item.drawCB);
+                        SDL_PushGPUFragmentUniformData(cmd, 0, &item.drawCB, sizeof item.drawCB);
+                    }
+                    SDL_BindGPUFragmentSamplers(rp, 0, item.bindings, 4);
+                    SDL_DrawGPUIndexedPrimitives(rp, item.idxCount, 1, 0, 0, 0);
+                }
+            }
+            SDL_EndGPURenderPass(rp);
         }
-        SDL_EndGPURenderPass(rp);
+    };
+
+    if (runStereo) {
+        encodeEye(-1);
+        encodeEye(+1);
+    } else {
+        encodeEye(0);
     }
 
     SDL_SubmitGPUCommandBuffer(cmd);
@@ -879,8 +988,7 @@ void SdlGpuDevice::Impl::Destroy() {
     for (SDL_GPUSampler* s : blitSamplers) if (s) SDL_ReleaseGPUSampler(gpu, s);
     if (defaultSampler) SDL_ReleaseGPUSampler(gpu, defaultSampler);
     for (auto& [k, t] : targets) {
-        if (t.tex) SDL_ReleaseGPUTexture(gpu, t.tex);
-        if (t.multisample) SDL_ReleaseGPUTexture(gpu, t.multisample);
+        ReleaseTargetTextures(t);
     }
     for (auto& [k, t] : textures) if (t.texture && t.texture != white) SDL_ReleaseGPUTexture(gpu, t.texture);
     if (white) SDL_ReleaseGPUTexture(gpu, white);
@@ -1071,15 +1179,17 @@ void SdlGpuDevice::Swap(u32 flags) {
 
     d.Flush();
 
-    if (d.onPresent && bb->physicalWidth && bb->physicalHeight) {
-        const u32 bytes = bb->physicalWidth * bb->physicalHeight * 4;
-        if (!d.downloadBuf || d.downloadCapacity < bytes) {
+    const bool wantStereoPresent = d.stereoEnabled && d.onPresentStereo && bb->rightTex;
+    if ((wantStereoPresent || d.onPresent) && bb->physicalWidth && bb->physicalHeight) {
+        const u32 eyeBytes = bb->physicalWidth * bb->physicalHeight * 4;
+        const u32 totalBytes = wantStereoPresent ? eyeBytes * 2 : eyeBytes;
+        if (!d.downloadBuf || d.downloadCapacity < totalBytes) {
             if (d.downloadBuf) SDL_ReleaseGPUTransferBuffer(d.gpu, d.downloadBuf);
             SDL_GPUTransferBufferCreateInfo tbi = {};
             tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
-            tbi.size = bytes;
+            tbi.size = totalBytes;
             d.downloadBuf = SDL_CreateGPUTransferBuffer(d.gpu, &tbi);
-            d.downloadCapacity = d.downloadBuf ? bytes : 0;
+            d.downloadCapacity = d.downloadBuf ? totalBytes : 0;
         }
         if (d.downloadBuf) {
             SDL_GPUCommandBuffer* dlCmd = SDL_AcquireGPUCommandBuffer(d.gpu);
@@ -1093,12 +1203,22 @@ void SdlGpuDevice::Swap(u32 flags) {
                 SDL_GPUTextureTransferInfo dst = {};
                 dst.transfer_buffer = d.downloadBuf;
                 SDL_DownloadFromGPUTexture(cp, &src, &dst);
+                if (wantStereoPresent) {
+                    src.texture = bb->rightTex;
+                    dst.offset = eyeBytes;
+                    SDL_DownloadFromGPUTexture(cp, &src, &dst);
+                }
                 SDL_EndGPUCopyPass(cp);
                 if (SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(dlCmd)) {
                     SDL_WaitForGPUFences(d.gpu, true, &fence, 1);
                     SDL_ReleaseGPUFence(d.gpu, fence);
                     if (void* px = SDL_MapGPUTransferBuffer(d.gpu, d.downloadBuf, false)) {
-                        d.onPresent(px, bb->physicalWidth, bb->physicalHeight);
+                        if (wantStereoPresent) {
+                            d.onPresentStereo(px, static_cast<const u8*>(px) + eyeBytes, bb->physicalWidth,
+                                              bb->physicalHeight);
+                        } else if (d.onPresent) {
+                            d.onPresent(px, bb->physicalWidth, bb->physicalHeight);
+                        }
                         SDL_UnmapGPUTransferBuffer(d.gpu, d.downloadBuf);
                     }
                 }
@@ -1153,6 +1273,18 @@ void SdlGpuDevice::SetFilter(Filter filter) { impl_->filter = filter; }
 
 void SdlGpuDevice::SetPresentCallback(PresentCallback cb) { impl_->onPresent = std::move(cb); }
 
+void SdlGpuDevice::SetStereoPresentCallback(StereoPresentCallback cb) { impl_->onPresentStereo = std::move(cb); }
+
+void SdlGpuDevice::SetStereo(bool enabled, f32 strength, f32 focus) {
+    Impl& d = *impl_;
+    d.stereoEnabled = enabled;
+    d.stereoStrength = strength;
+    d.stereoFocus = focus;
+    if (enabled && d.gpu) d.EnsureStereoTargets();
+}
+
+bool SdlGpuDevice::StereoEnabled() const { return impl_->stereoEnabled; }
+
 bool SdlGpuDevice::SetAnisotropy(u32 value) {
     if (!ValidAnisotropy(value)) return false;
     impl_->anisotropy = value;
@@ -1184,25 +1316,19 @@ bool SdlGpuDevice::SetAntiAliasing(u32 samples, std::string& error) {
     Impl::Target color, depth;
     if (!d.MakeTarget(d.sceneColor, false, color, samples) ||
         !d.MakeTarget(d.sceneDepth, true, depth, samples)) {
-        if (color.tex) SDL_ReleaseGPUTexture(d.gpu, color.tex);
-        if (color.multisample) SDL_ReleaseGPUTexture(d.gpu, color.multisample);
-        if (depth.tex) SDL_ReleaseGPUTexture(d.gpu, depth.tex);
+        d.ReleaseTargetTextures(color);
+        d.ReleaseTargetTextures(depth);
         error = "scene MSAA colour/depth allocation failed";
         return false;
     }
-    auto releaseTarget = [&](Impl::Target& t) {
-        if (t.tex) SDL_ReleaseGPUTexture(d.gpu, t.tex);
-        if (t.multisample) SDL_ReleaseGPUTexture(d.gpu, t.multisample);
-        t.tex = t.multisample = nullptr;
-    };
     if (auto it = d.targets.find(d.sceneColor); it != d.targets.end()) {
-        releaseTarget(it->second);
+        d.ReleaseTargetTextures(it->second);
         it->second = color;
     } else {
         d.targets[d.sceneColor] = color;
     }
     if (auto it = d.targets.find(d.sceneDepth); it != d.targets.end()) {
-        releaseTarget(it->second);
+        d.ReleaseTargetTextures(it->second);
         it->second = depth;
     } else {
         d.targets[d.sceneDepth] = depth;
@@ -1467,6 +1593,7 @@ void SdlGpuDevice::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
     Impl::PassRecord& pass = d.ActivePass(ct, dt, ctKey);
 
     Impl::DrawItem item;
+    item.isStereoWorld = d.stereoEnabled && d.sceneWorld && !rhw && ct->scene;
     item.pipeline = d.GetDrawPipeline(pkey, topo, useDepth, rs, ct->samples, alphaToCoverage);
     const f32 sx = f32(ct->physicalWidth) / ct->width, sy = f32(ct->physicalHeight) / ct->height;
     item.viewport = {viewport.X * sx, viewport.Y * sy, viewport.Width * sx, viewport.Height * sy,

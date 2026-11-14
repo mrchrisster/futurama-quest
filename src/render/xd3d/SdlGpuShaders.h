@@ -55,6 +55,7 @@ struct DrawCB {
     int4 lightCount;
     Light lights[8];
     float4 texScale[4];
+    float4 stereo;
 };
 
 struct VSIn {
@@ -140,6 +141,9 @@ vertex VSOut VSMain(VSIn i [[stage_in]], constant DrawCB& cb [[buffer(0)]]) {
         float4 c = mulRow(v, cb.proj);
         c.x += c.w / cb.vp.z * 2.0f * (0.53125f * cb.ssOffset.z + cb.ssOffset.x);
         c.y -= c.w / cb.vp.w * 2.0f * (0.53125f * cb.ssOffset.w + cb.ssOffset.y);
+        if (cb.stereo.z > 0.5f) {
+            c.x += cb.stereo.x * (c.w - cb.stereo.y);
+        }
         o.pos = c;
         pv = v.xyz;
         if (cb.misc2.x > 0.5f) {

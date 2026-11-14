@@ -127,12 +127,15 @@ int main(int argc, char** argv) {
     using GpuDevice = render::xd3d::D3D11Device;
 #endif
 #ifdef FUT_USE_OPENXR
-    u32 width = 2560, height = 1440;                  // OpenXR 2D theater quad texture size (1440p)
+    u32 width = 1600, height = 900;                   // per-eye OpenXR 3D theater quad texture size (3200x900 SBS)
     bool fullscreen = false;
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
-    double aspect = 16.0 / 9.0;                       // 16:9 widescreen quad (854x480 -> 2560x1440)
+    double aspect = 16.0 / 9.0;                       // 16:9 widescreen quad
     u32 aaSamples = 4, anisotropy = 16;               // crisp 4x MSAA + 16x AF on Quest 3 quad
+    bool stereo = true;                               // stereoscopic 3D window by default (--2d disables)
+    f32 stereoStrength = 0.022f;                      // clip-space shift at infinity (~5.6 cm on 2.56 m quad)
+    f32 stereoFocus = 12.0f;                          // convergence depth in game units (just in front of Fry)
 #elif defined(__ANDROID__)
     u32 width = 1280, height = 960;                   // the windowed size (--size WxH)
     bool fullscreen = false;                          // Android/Quest OS manages the 2D panel surface
@@ -180,6 +183,12 @@ int main(int argc, char** argv) {
             else if (std::sscanf(s.c_str(), "%u:%u", &w, &h) == 2 && w > 0 && h > 0) aspect = double(w) / h;
             else return fail("--aspect takes auto, 4:3, 16:9, 16:10, 21:9 or <w>:<h>", 2);
         } else if (a == "--saves" && i + 1 < argc) saveDir = argv[++i];
+#ifdef FUT_USE_OPENXR
+        else if (a == "--2d") stereo = false;
+        else if (a == "--3d") stereo = true;
+        else if (a == "--stereo-strength" && i + 1 < argc) stereoStrength = std::strtof(argv[++i], nullptr);
+        else if (a == "--stereo-focus" && i + 1 < argc) stereoFocus = std::strtof(argv[++i], nullptr);
+#endif
         else {
             return fail(std::string("unknown option (or its value missing): ") + argv[i], 2);
         }
@@ -199,7 +208,7 @@ int main(int argc, char** argv) {
 #ifdef FUT_USE_OPENXR
     if (!window.Create("Futurama", 64, 64, false, false)) return fail("window creation failed", 1);
     platform::OpenXrTheater xr;
-    if (!xr.Init(width, height, error)) return fail(error, 1);
+    if (!xr.Init(width, height, error, stereo)) return fail(error, 1);
 #else
     if (!window.Create("Futurama", width, height, false, fullscreen)) return fail("window creation failed", 1);
 #endif
@@ -220,8 +229,12 @@ int main(int argc, char** argv) {
     }
     device.SetRenderScale(renderScale);               // (before Init: the targets are made at the scale)
 #ifdef FUT_USE_OPENXR
+    device.SetStereo(stereo, stereoStrength, stereoFocus);
     if (!device.Init(nullptr, width, height, error)) return fail(error, 1);
     device.SetPresentCallback([&](const void* rgba, u32 w, u32 h) { xr.PresentFrame(rgba, w, h); });
+    device.SetStereoPresentCallback([&](const void* leftRgba, const void* rightRgba, u32 w, u32 h) {
+        xr.PresentStereoFrame(leftRgba, rightRgba, w, h);
+    });
 #elif defined(FUT_USE_SDL_GPU)
     if (!device.Init(window.Handle(), window.Width(), window.Height(), error)) return fail(error, 1);
 #else
@@ -254,6 +267,7 @@ int main(int argc, char** argv) {
     std::vector<s32> soundDrop;
     auto finish = [&](int rc) {
 #ifdef FUT_USE_OPENXR
+        device.SetStereoPresentCallback(nullptr);
         device.SetPresentCallback(nullptr);
         xr.Shutdown();
 #endif
@@ -324,6 +338,12 @@ int main(int argc, char** argv) {
         if (!xr.BeginFrame()) {
             SDL_Delay(8);
             continue;
+        }
+        if (xr.ConsumeStereoToggle()) {
+            stereo = !stereo;
+            device.SetStereo(stereo, stereoStrength, stereoFocus);
+            std::fprintf(stderr, "OpenXR 3D Window: %s (strength=%.3f, focus=%.1f)\n", stereo ? "ON" : "OFF",
+                         stereoStrength, stereoFocus);
         }
         gamepads.Poll();                              // (keep BT pads working alongside Quest Touch Plus)
         app.frame = f++;

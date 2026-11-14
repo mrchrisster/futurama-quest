@@ -86,6 +86,15 @@ cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
 cmake --build build -j
 ```
 
+**Meta Quest (OpenXR 3D Window).** Renders a stereoscopic 3D theater window over Quest passthrough (`1600x900` per eye, `4x` MSAA, `16x` AF, OpenXR quad supersampling) with Touch Plus input and haptics, keeping 2D HUD/menus flat on the window plane:
+
+- **Your disc image:** Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe`) to `/sdcard/Android/data/com.futuramarecomp.app/files/`, `/sdcard/Futurama/`, or `/sdcard/Download/`.
+- **Touch Plus shortcuts:** `L3 + R3` recenters the screen; `LB + RB + L3` (both grips + left stick click) toggles 3D / 2D live; `LB + RB + Menu` acts as Back.
+- **Building the APK:** Requires Android SDK (API 35), NDK 28.2, CMake 3.31.5, and JDK 17:
+```
+cd android && ./gradlew assembleRelease
+```
+
 Have fun!
 
 ## Quality-of-life improvements

@@ -412,7 +412,9 @@ void NiXBoxRenderer::DrawScreenPolygon(ni::NiScreenPolygon& poly) {   // orig: 0
     d3d_.SetTransform(TS_VIEW, screenView_);          // +0x354
     d3d_.SetTransform(TS_PROJECTION, ScreenProjection());   // +0x394
     // 0x00149B70(0, 0, the identity transform (0x002D7820, translate 0x002F915C, scale 1), +0x32C, +0x690, 0)
+    const bool previousWorld = d3d_.SetSceneWorld(false);
     DrawGeometry(nullptr, nullptr, ni::NiTransform{}, polyData_);
+    d3d_.SetSceneWorld(previousWorld);
     d3d_.SetTransform(TS_VIEW, view_);                // +0x610
     d3d_.SetTransform(TS_PROJECTION, projection_);    // +0x650
 }

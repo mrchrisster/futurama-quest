@@ -58,6 +58,7 @@ DRAW_CB_FIELDS = """
     ivec4 lightCount;
     Light lights[8];
     vec4 texScale[4];
+    vec4 stereo;
 """
 
 VS_MAIN = f"""#version 450
@@ -147,6 +148,9 @@ void main() {{
         vec4 c = mulRow(v, cb.proj);
         c.x += c.w / cb.vp.z * 2.0 * (0.53125 * cb.ssOffset.z + cb.ssOffset.x);
         c.y -= c.w / cb.vp.w * 2.0 * (0.53125 * cb.ssOffset.w + cb.ssOffset.y);
+        if (cb.stereo.z > 0.5) {{
+            c.x += cb.stereo.x * (c.w - cb.stereo.y);
+        }}
         gl_Position = c;
         pv = v.xyz;
         if (cb.misc2.x > 0.5) {{

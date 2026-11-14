@@ -78,10 +78,12 @@ struct OpenXrTheater::Impl {
         std::vector<VkFramebuffer> framebuffers;
     } eyes[2];
 
-    // Floating 2D theater quad swapchain + staging upload buffer.
+    // Floating theater quad swapchain + staging upload buffer (side-by-side when stereo).
     XrSwapchain quadSwapchain = XR_NULL_HANDLE;
     std::vector<XrSwapchainImageVulkanKHR> quadImages;
-    u32 quadW = 0, quadH = 0;
+    u32 quadEyeW = 0, quadEyeH = 0;
+    bool quadStereo = false;
+    bool initStereo = false;
     bool hasQuadFrame = false;
     VkBuffer stagingBuf = VK_NULL_HANDLE;
     VkDeviceMemory stagingMem = VK_NULL_HANDLE;
@@ -107,6 +109,8 @@ struct OpenXrTheater::Impl {
     bool frameActive = false;
     bool recenterPending = false;
     bool prevRecenterChord = false;
+    bool stereoTogglePending = false;
+    bool prevStereoChord = false;
 
     // Input actions (/interaction_profiles/oculus/touch_controller)
     XrActionSet actionSet = XR_NULL_HANDLE;
@@ -124,7 +128,8 @@ struct OpenXrTheater::Impl {
 
     bool CreateVulkan(std::string& error);
     bool CreateSwapchains(u32 w, u32 h, std::string& error);
-    bool RecreateQuadSwapchain(u32 w, u32 h);
+    bool RecreateQuadSwapchain(u32 eyeW, u32 eyeH, bool stereo);
+    void UploadQuadRegions(const VkBufferImageCopy* regions, u32 regionCount);
     bool CreateActions(std::string& error);
     void InitPassthrough();
     void SyncActions();
@@ -250,10 +255,13 @@ bool OpenXrTheater::Impl::CreateVulkan(std::string& error) {
     return true;
 }
 
-bool OpenXrTheater::Impl::RecreateQuadSwapchain(u32 w, u32 h) {
-    w = std::max(w, 1u);
-    h = std::max(h, 1u);
-    if (quadSwapchain && w == quadW && h == quadH) return true;
+bool OpenXrTheater::Impl::RecreateQuadSwapchain(u32 eyeW, u32 eyeH, bool stereo) {
+    eyeW = std::max(eyeW, 1u);
+    eyeH = std::max(eyeH, 1u);
+    if (quadSwapchain && eyeW == quadEyeW && eyeH == quadEyeH && stereo == quadStereo) return true;
+
+    const u32 texW = stereo ? eyeW * 2 : eyeW;
+    const u32 texH = eyeH;
 
     if (vkDevice) vkDeviceWaitIdle(vkDevice);
     if (stagingMapped) {
@@ -275,7 +283,7 @@ bool OpenXrTheater::Impl::RecreateQuadSwapchain(u32 w, u32 h) {
     quadImages.clear();
     hasQuadFrame = false;
 
-    const VkDeviceSize bufSize = VkDeviceSize(w) * h * 4;
+    const VkDeviceSize bufSize = VkDeviceSize(texW) * texH * 4;
     VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
     bci.size = bufSize;
     bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
@@ -300,8 +308,8 @@ bool OpenXrTheater::Impl::RecreateQuadSwapchain(u32 w, u32 h) {
                      XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
     sci.format = swapFormat;
     sci.sampleCount = 1;
-    sci.width = w;
-    sci.height = h;
+    sci.width = texW;
+    sci.height = texH;
     sci.faceCount = 1;
     sci.arraySize = 1;
     sci.mipCount = 1;
@@ -312,10 +320,11 @@ bool OpenXrTheater::Impl::RecreateQuadSwapchain(u32 w, u32 h) {
     quadImages.assign(imgCount, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
     xrEnumerateSwapchainImages(quadSwapchain, imgCount, &imgCount,
                                reinterpret_cast<XrSwapchainImageBaseHeader*>(quadImages.data()));
-    quadW = w;
-    quadH = h;
+    quadEyeW = eyeW;
+    quadEyeH = eyeH;
+    quadStereo = stereo;
     quadSize.height = 1.44f;
-    quadSize.width = 1.44f * (float(w) / float(h));
+    quadSize.width = 1.44f * (float(eyeW) / float(eyeH));
     return true;
 }
 
@@ -418,7 +427,7 @@ bool OpenXrTheater::Impl::CreateSwapchains(u32 w, u32 h, std::string& error) {
         }
     }
 
-    if (!RecreateQuadSwapchain(w, h)) {
+    if (!RecreateQuadSwapchain(w, h, initStereo)) {
         error = "Failed to create OpenXR quad swapchain";
         return false;
     }
@@ -610,6 +619,11 @@ void OpenXrTheater::Impl::SyncActions() {
     if (chord && !prevRecenterChord) recenterPending = true;
     prevRecenterChord = chord;
 
+    // LB + RB + L3 (without R3) live-toggles stereoscopic 3D window mode.
+    const bool stereoChord = lb && rb && l3 && !r3;
+    if (stereoChord && !prevStereoChord) stereoTogglePending = true;
+    prevStereoChord = stereoChord;
+
     if (menu) {
         if (lb && rb) gamepad.buttons |= 0x0020;        // Back
         else gamepad.buttons |= 0x0010;                 // Start
@@ -708,8 +722,9 @@ void OpenXrTheater::Impl::Destroy() {
 OpenXrTheater::OpenXrTheater() : impl_(std::make_unique<Impl>()) {}
 OpenXrTheater::~OpenXrTheater() { Shutdown(); }
 
-bool OpenXrTheater::Init(u32 width, u32 height, std::string& error) {
+bool OpenXrTheater::Init(u32 width, u32 height, std::string& error, bool stereo) {
     Impl& d = *impl_;
+    d.initStereo = stereo;
     JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
     JavaVM* vm = nullptr;
     if (!env || env->GetJavaVM(&vm) != JNI_OK || !vm) {
@@ -839,9 +854,10 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error) {
         }
     }
     d.InitPassthrough();
-    SDL_Log("OpenXR Theater Quad initialized (passthrough=%d, quad=%ux%u, fmt=%lld, colorSpace=%d, layerSettings=%d)",
-            (int)(d.passthroughLayer != XR_NULL_HANDLE), d.quadW, d.quadH, (long long)d.swapFormat,
-            (int)d.colorSpaceExt, (int)d.layerSettingsExt);
+    SDL_Log("OpenXR Theater Quad initialized (passthrough=%d, quad=%ux%u, stereo=%d, fmt=%lld, colorSpace=%d, "
+            "layerSettings=%d)",
+            (int)(d.passthroughLayer != XR_NULL_HANDLE), d.quadEyeW, d.quadEyeH, (int)d.quadStereo,
+            (long long)d.swapFormat, (int)d.colorSpaceExt, (int)d.layerSettingsExt);
     return true;
 }
 
@@ -895,34 +911,25 @@ bool OpenXrTheater::BeginFrame() {
     return true;
 }
 
-void OpenXrTheater::PresentFrame(const void* rgba, u32 width, u32 height) {
-    Impl& d = *impl_;
-    if (!d.frameActive || !rgba || !width || !height) return;
-    if (!d.RecreateQuadSwapchain(width, height)) return;
-
+void OpenXrTheater::Impl::UploadQuadRegions(const VkBufferImageCopy* regions, u32 regionCount) {
     u32 idx = 0;
     XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (XR_FAILED(xrAcquireSwapchainImage(d.quadSwapchain, &ai, &idx))) return;
+    if (XR_FAILED(xrAcquireSwapchainImage(quadSwapchain, &ai, &idx))) return;
 
     XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wi.timeout = XR_INFINITE_DURATION;
-    if (XR_FAILED(xrWaitSwapchainImage(d.quadSwapchain, &wi))) {
+    if (XR_FAILED(xrWaitSwapchainImage(quadSwapchain, &wi))) {
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(d.quadSwapchain, &ri);
+        xrReleaseSwapchainImage(quadSwapchain, &ri);
         return;
     }
 
-    vkWaitForFences(d.vkDevice, 1, &d.cmdFence, VK_TRUE, UINT64_MAX);
-    vkResetFences(d.vkDevice, 1, &d.cmdFence);
-
-    std::memcpy(d.stagingMapped, rgba, size_t(width) * height * 4);
-
-    vkResetCommandBuffer(d.cmdBuf, 0);
+    vkResetCommandBuffer(cmdBuf, 0);
     VkCommandBufferBeginInfo cbi{VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO};
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
-    vkBeginCommandBuffer(d.cmdBuf, &cbi);
+    vkBeginCommandBuffer(cmdBuf, &cbi);
 
-    VkImage img = d.quadImages[idx].image;
+    VkImage img = quadImages[idx].image;
     VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -931,13 +938,10 @@ void OpenXrTheater::PresentFrame(const void* rgba, u32 width, u32 height) {
     toDst.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toDst.image = img;
     toDst.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(d.cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
+    vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &toDst);
 
-    VkBufferImageCopy region{};
-    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
-    region.imageExtent = {width, height, 1};
-    vkCmdCopyBufferToImage(d.cmdBuf, d.stagingBuf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
+    vkCmdCopyBufferToImage(cmdBuf, stagingBuf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regionCount, regions);
 
     VkImageMemoryBarrier toColor{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toColor.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -948,19 +952,60 @@ void OpenXrTheater::PresentFrame(const void* rgba, u32 width, u32 height) {
     toColor.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
     toColor.image = img;
     toColor.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    vkCmdPipelineBarrier(d.cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
+    vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &toColor);
 
-    vkEndCommandBuffer(d.cmdBuf);
+    vkEndCommandBuffer(cmdBuf);
 
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
-    si.pCommandBuffers = &d.cmdBuf;
-    vkQueueSubmit(d.vkQueue, 1, &si, d.cmdFence);
+    si.pCommandBuffers = &cmdBuf;
+    vkQueueSubmit(vkQueue, 1, &si, cmdFence);
 
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    xrReleaseSwapchainImage(d.quadSwapchain, &ri);
-    d.hasQuadFrame = true;
+    xrReleaseSwapchainImage(quadSwapchain, &ri);
+    hasQuadFrame = true;
+}
+
+void OpenXrTheater::PresentFrame(const void* rgba, u32 width, u32 height) {
+    Impl& d = *impl_;
+    if (!d.frameActive || !rgba || !width || !height) return;
+    if (!d.RecreateQuadSwapchain(width, height, false)) return;
+
+    vkWaitForFences(d.vkDevice, 1, &d.cmdFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(d.vkDevice, 1, &d.cmdFence);
+    std::memcpy(d.stagingMapped, rgba, size_t(width) * height * 4);
+
+    VkBufferImageCopy region{};
+    region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    region.imageExtent = {width, height, 1};
+    d.UploadQuadRegions(&region, 1);
+}
+
+void OpenXrTheater::PresentStereoFrame(const void* leftRgba, const void* rightRgba, u32 eyeWidth, u32 eyeHeight) {
+    Impl& d = *impl_;
+    if (!d.frameActive || !leftRgba || !rightRgba || !eyeWidth || !eyeHeight) return;
+    if (!d.RecreateQuadSwapchain(eyeWidth, eyeHeight, true)) return;
+
+    vkWaitForFences(d.vkDevice, 1, &d.cmdFence, VK_TRUE, UINT64_MAX);
+    vkResetFences(d.vkDevice, 1, &d.cmdFence);
+
+    const size_t eyeBytes = size_t(eyeWidth) * eyeHeight * 4;
+    u8* mapped = static_cast<u8*>(d.stagingMapped);
+    std::memcpy(mapped, leftRgba, eyeBytes);
+    std::memcpy(mapped + eyeBytes, rightRgba, eyeBytes);
+
+    VkBufferImageCopy regions[2]{};
+    regions[0].bufferOffset = 0;
+    regions[0].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    regions[0].imageOffset = {0, 0, 0};
+    regions[0].imageExtent = {eyeWidth, eyeHeight, 1};
+
+    regions[1].bufferOffset = eyeBytes;
+    regions[1].imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+    regions[1].imageOffset = {static_cast<int32_t>(eyeWidth), 0, 0};
+    regions[1].imageExtent = {eyeWidth, eyeHeight, 1};
+    d.UploadQuadRegions(regions, 2);
 }
 
 void OpenXrTheater::EndFrame() {
@@ -1048,23 +1093,37 @@ void OpenXrTheater::EndFrame() {
         }
     }
 
-    XrCompositionLayerQuad quadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
-    XrCompositionLayerSettingsFB quadSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
+    XrCompositionLayerQuad quadLayers[2] = {
+        {XR_TYPE_COMPOSITION_LAYER_QUAD},
+        {XR_TYPE_COMPOSITION_LAYER_QUAD},
+    };
+    XrCompositionLayerSettingsFB quadSettings[2] = {
+        {XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB},
+        {XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB},
+    };
     if (d.hasQuadFrame && d.frameState.shouldRender) {
-        if (d.layerSettingsExt) {
-            quadSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
-                                      XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
-            quadLayer.next = &quadSettings;
+        const u32 eyesCount = d.quadStereo ? 2u : 1u;
+        const int32_t eyeW = static_cast<int32_t>(d.quadEyeW);
+        const int32_t eyeH = static_cast<int32_t>(d.quadEyeH);
+        for (u32 eye = 0; eye < eyesCount; ++eye) {
+            XrCompositionLayerQuad& ql = quadLayers[eye];
+            if (d.layerSettingsExt) {
+                quadSettings[eye].layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                               XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
+                ql.next = &quadSettings[eye];
+            }
+            ql.layerFlags = 0;
+            ql.space = d.localSpace;
+            ql.eyeVisibility = !d.quadStereo ? XR_EYE_VISIBILITY_BOTH
+                             : eye == 0      ? XR_EYE_VISIBILITY_LEFT
+                                             : XR_EYE_VISIBILITY_RIGHT;
+            ql.subImage.swapchain = d.quadSwapchain;
+            ql.subImage.imageRect = {{static_cast<int32_t>(eye) * eyeW, 0}, {eyeW, eyeH}};
+            ql.subImage.imageArrayIndex = 0;
+            ql.pose = d.quadPose;
+            ql.size = d.quadSize;
+            layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&ql));
         }
-        quadLayer.layerFlags = 0;
-        quadLayer.space = d.localSpace;
-        quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
-        quadLayer.subImage.swapchain = d.quadSwapchain;
-        quadLayer.subImage.imageRect = {{0, 0}, {static_cast<int32_t>(d.quadW), static_cast<int32_t>(d.quadH)}};
-        quadLayer.subImage.imageArrayIndex = 0;
-        quadLayer.pose = d.quadPose;
-        quadLayer.size = d.quadSize;
-        layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&quadLayer));
     }
 
     XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
@@ -1076,6 +1135,12 @@ void OpenXrTheater::EndFrame() {
 }
 
 const input::GamepadState& OpenXrTheater::Gamepad() const { return impl_->gamepad; }
+
+bool OpenXrTheater::ConsumeStereoToggle() {
+    const bool t = impl_->stereoTogglePending;
+    impl_->stereoTogglePending = false;
+    return t;
+}
 
 void OpenXrTheater::SetHaptics(u16 left, u16 right) {
     Impl& d = *impl_;
