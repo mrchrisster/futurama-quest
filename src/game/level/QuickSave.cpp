@@ -55,10 +55,15 @@ void CopyIds(const std::vector<u16>& src, std::vector<u16>& dst, u32& dstCount) 
 // original's stack buffer; the port cuts it.)
 template <class... A>
 bool Put(std::string& out, const char* fmt, A... args) {
-    char buf[0x400];
-    std::snprintf(buf, sizeof buf, fmt, args...);
-    out += buf;
-    return buf[0] != '\0';
+    if constexpr (sizeof...(args) == 0) {
+        out += fmt;
+        return fmt[0] != '\0';
+    } else {
+        char buf[0x400];
+        std::snprintf(buf, sizeof buf, fmt, args...);
+        out += buf;
+        return buf[0] != '\0';
+    }
 }
 
 // orig: 0x00077930 (the nibbler map S+0x1FC): the level's cash pickups that sit in an inventory are marked collected

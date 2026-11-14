@@ -62,6 +62,9 @@
 #else
 #include "render/xd3d/D3D11Device.h"
 #endif
+#ifdef __ANDROID__
+#include <SDL3/SDL_main.h>
+#endif
 
 
 #include <algorithm>
@@ -120,10 +123,17 @@ int main(int argc, char** argv) {
     using GpuDevice = render::xd3d::D3D11Device;
 #endif
     u32 width = 1280, height = 960;                   // the windowed size (--size WxH)
+#ifdef __ANDROID__
+    bool fullscreen = false;                          // Android/Quest OS manages the 2D panel surface
+    GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
+    double renderScale = 0;                           // (--render-scale: 0 = auto)
+    double aspect = 0;                                // fill the Horizon OS 2D panel automatically
+#else
     bool fullscreen = true;                           // (--size / --windowed: a window; --fullscreen: full screen)
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
     double aspect = 4.0 / 3.0;                        // (--aspect: the canvas's shape; 0 = auto, the window's)
+#endif
     u32 aaSamples = 1, anisotropy = 1;                // (--aa / --anisotropic: the original sampling)
     std::filesystem::path saveDir = SaveFolder();     // (--saves <dir>)
     for (int i = hasSourceArg ? 2 : 1; i < argc; ++i) {

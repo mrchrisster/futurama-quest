@@ -199,6 +199,47 @@ std::string FindDisc(const std::function<bool(const std::string& source, std::st
         if (test(p, source)) return source;
         ErrorBox("Found " + Utf8(p) + " next to the game, but it can't be used:\n\n" + error);
     }
+#ifdef __ANDROID__
+    {
+        std::vector<sfs::path> dirs;
+        std::string extHint;
+        if (const char* ext = SDL_GetAndroidExternalStoragePath()) {
+            extHint = ext;
+            dirs.push_back(PathOf(ext));
+        }
+        dirs.push_back(PrefFolder());
+        dirs.push_back(sfs::path("/sdcard/Futurama"));
+        dirs.push_back(sfs::path("/sdcard/Download"));
+        for (const sfs::path& d : dirs) {
+            if (d.empty() || !sfs::exists(d, ec)) continue;
+            for (const sfs::path& p : NextToExe(d)) {
+                if (test(p, source)) {
+                    Remember(settings, p);
+                    return source;
+                }
+            }
+            for (auto it = sfs::directory_iterator(d, ec); !ec && it != sfs::directory_iterator(); it.increment(ec)) {
+                const sfs::path& p = it->path();
+                if (!it->is_regular_file(ec) || !NameIs(p.extension(), ".iso")) continue;
+                std::string fn = Utf8(p.filename());
+                for (char& c : fn) c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+                if (fn.find("futurama") != std::string::npos && test(p, source)) {
+                    Remember(settings, p);
+                    return source;
+                }
+            }
+        }
+        const sfs::path p = AskDisc(dirs.empty() ? dir : dirs[0]);
+        if (!p.empty() && test(p, source)) {
+            Remember(settings, p);
+            return source;
+        }
+        ErrorBox("No Futurama (Xbox) disc image (.iso) found.\n\nCopy your Futurama .iso to:\n" +
+                 (extHint.empty() ? std::string("/sdcard/Android/data/com.futuramarecomp.app/files/") : extHint) +
+                 (error.empty() ? std::string() : ("\n\nLast error: " + error)));
+        return {};
+    }
+#endif
     for (;;) {
         const sfs::path p = AskDisc(dir);
         if (p.empty()) return {};

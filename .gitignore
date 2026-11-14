@@ -4,3 +4,8 @@ out/
 *.user
 *.iso
 .fut-export
+android/.gradle/
+android/build/
+android/app/.cxx/
+android/app/build/
+android/local.properties

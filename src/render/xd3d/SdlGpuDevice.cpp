@@ -1,9 +1,10 @@
-// SDL3 GPU backend (Metal on macOS); see SdlGpuDevice.h.
+// SDL3 GPU backend (Metal on macOS, Vulkan SPIR-V on Android/Linux); see SdlGpuDevice.h.
 #include "render/xd3d/SdlGpuDevice.h"
 
 #include "engine/ni/NiObjects.h"
 #include "render/TextureDecode.h"
 #include "render/xd3d/SdlGpuShaders.h"
+#include "render/xd3d/SdlGpuSpirvBlobs.h"
 
 #include <SDL3/SDL.h>
 
@@ -279,21 +280,49 @@ struct SdlGpuDevice::Impl {
 SDL_GPUShader* SdlGpuDevice::Impl::LoadShader(const char* entry, SDL_GPUShaderStage stage, u32 numSamplers,
                                               u32 numUniforms, std::string& error) {
     const SDL_GPUShaderFormat formats = SDL_GetGPUShaderFormats(gpu);
+    SDL_GPUShaderCreateInfo info = {};
+    info.stage = stage;
+    info.num_samplers = numSamplers;
+    info.num_uniform_buffers = numUniforms;
     if (formats & SDL_GPU_SHADERFORMAT_MSL) {
-        SDL_GPUShaderCreateInfo info = {};
         info.code = reinterpret_cast<const Uint8*>(sdl_shaders::kMslShaderSource);
         info.code_size = std::strlen(sdl_shaders::kMslShaderSource);
         info.entrypoint = entry;
         info.format = SDL_GPU_SHADERFORMAT_MSL;
-        info.stage = stage;
-        info.num_samplers = numSamplers;
-        info.num_uniform_buffers = numUniforms;
-        SDL_GPUShader* sh = SDL_CreateGPUShader(gpu, &info);
-        if (!sh) error = std::string("SDL_CreateGPUShader(") + entry + ") failed: " + SDL_GetError();
-        return sh;
+    } else if (formats & SDL_GPU_SHADERFORMAT_SPIRV) {
+        struct SpirvEntry {
+            const char* name;
+            const unsigned char* code;
+            size_t size;
+        };
+        static constexpr SpirvEntry kSpirv[] = {
+            {"VSMain", sdl_spirv_shaders::kVSMain, sizeof(sdl_spirv_shaders::kVSMain)},
+            {"PSMain", sdl_spirv_shaders::kPSMain, sizeof(sdl_spirv_shaders::kPSMain)},
+            {"ClearVS", sdl_spirv_shaders::kClearVS, sizeof(sdl_spirv_shaders::kClearVS)},
+            {"ClearPS", sdl_spirv_shaders::kClearPS, sizeof(sdl_spirv_shaders::kClearPS)},
+            {"BlitVS", sdl_spirv_shaders::kBlitVS, sizeof(sdl_spirv_shaders::kBlitVS)},
+            {"BlitPS", sdl_spirv_shaders::kBlitPS, sizeof(sdl_spirv_shaders::kBlitPS)},
+        };
+        for (const auto& s : kSpirv) {
+            if (std::strcmp(entry, s.name) == 0) {
+                info.code = s.code;
+                info.code_size = s.size;
+                break;
+            }
+        }
+        if (!info.code) {
+            error = std::string("Missing SPIR-V shader for entry: ") + entry;
+            return nullptr;
+        }
+        info.entrypoint = "main";
+        info.format = SDL_GPU_SHADERFORMAT_SPIRV;
+    } else {
+        error = "SDL_GPU device does not support MSL or SPIR-V shaders on this platform";
+        return nullptr;
     }
-    error = "SDL_GPU device does not support MSL shaders on this platform";
-    return nullptr;
+    SDL_GPUShader* sh = SDL_CreateGPUShader(gpu, &info);
+    if (!sh) error = std::string("SDL_CreateGPUShader(") + entry + ") failed: " + SDL_GetError();
+    return sh;
 }
 
 bool SdlGpuDevice::Impl::UploadTextureData(SDL_GPUTexture* tex, u32 width, u32 height, u32 level, const void* data,
@@ -880,7 +909,7 @@ bool SdlGpuDevice::Init(SDL_Window* window, u32 width, u32 height, std::string& 
     d.windowHeight = std::max(height, 1u);
 
     const bool debug = std::getenv("FUT_GPU_DEBUG") != nullptr;
-    d.gpu = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, debug, nullptr);
+    d.gpu = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_SPIRV, debug, nullptr);
     if (!d.gpu) {
         error = std::string("SDL_CreateGPUDevice failed: ") + SDL_GetError();
         return false;
@@ -1043,7 +1072,9 @@ void SdlGpuDevice::Swap(u32 flags) {
     if (!cmd) return;
     SDL_GPUTexture* swapTex = nullptr;
     Uint32 sw = 0, sh = 0;
+    bool resized = false;
     if (SDL_WaitAndAcquireGPUSwapchainTexture(cmd, d.window, &swapTex, &sw, &sh) && swapTex && sw && sh) {
+        resized = (sw != d.windowWidth || sh != d.windowHeight);
         d.windowWidth = sw;
         d.windowHeight = sh;
         SDL_GPUColorTargetInfo ci = {};
@@ -1068,6 +1099,7 @@ void SdlGpuDevice::Swap(u32 flags) {
         SDL_EndGPURenderPass(rp);
     }
     SDL_SubmitGPUCommandBuffer(cmd);
+    if (resized && d.autoScale) SetRenderScale(0.0);
 }
 
 void SdlGpuDevice::Resize(u32 width, u32 height) {
