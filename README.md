@@ -1,148 +1,118 @@
-![Fry at his PC, launching Futurama: The Game Recomp](docs/header.png)
+![Futurama Quest 3](https://hackertrips.wordpress.com/wp-content/uploads/2014/08/futurama-net5-e1407638267292.png?w=652)
 
-# Futurama: The Game: The Recomp
+# Futurama Quest (Meta Quest 3 Port)
 
-**Good news, everyone!** The 2003 Futurama game for the original Xbox now runs natively on Windows and Linux!
+**Good news, everyone!** The 2003 Xbox game **Futurama** runs natively on **Meta Quest 3** in a **stereoscopic 3D floating theater window** over passthrough.
 
-I rebuilt the whole game in C++, one function at a time, straight from the original Xbox code.
-Graphics go through Direct3D 11 (translated to Vulkan on Linux). Window management, audio and input are handled via
-SDL3, so you can bring your keyboard or Xbox / DualShock / Switch controller.
-
-The aim was 1:1 with the original. Same levels, same physics, same scripts, same timing, even the same random
-numbers, frame for frame. It's not a remake or a remaster. It's the same game, it just runs outside of the PS2/Xbox now.
-Automated full playthroughs, replayed on this port and on the original via emulator, confirm it is frame-perfect
-start to finish: all 752,000 frames of a complete playthrough match.
-
-It's not an automatic translation of the disc (a static recomp). All of the game's code is decompiled right here in
-this repo, written out in C++, and it's what gets compiled into the exe. Nothing from the disc's executable gets
-translated or run as game code.
+This project is a Meta Quest 3 (OpenXR / Vulkan) and macOS (Metal) port of [hiburn8/Futurama-The-Game-The-Recomp](https://github.com/hiburn8/Futurama-The-Game-The-Recomp), the frame-accurate 1:1 C++ decompilation of the original Xbox game.
 
 ### You'll need your own copy
 
-There's no game data in here. You need your own Xbox copy of Futurama, either the North American (NTSC-U) or the
-European (PAL) one, as a disc image (`.iso`) or the extracted files. All the models, textures, sounds, movies and
-scripts get loaded from that when you play.
+No game data is included in this repository or release APK. You need your own original Xbox copy of *Futurama* (NTSC-U or PAL) as a disc image (`.iso`) or extracted disc files (`default.xbe` + assets).
 
-## Playing
+---
 
-Grab the build for your system from the [Releases](../../releases) page.
+## Meta Quest 3 Features
 
-**Windows.** Unzip it anywhere and double-click `FuturamaRecomp.exe`. The first time, it asks for your disc image
-(your `.iso`, or the `default.xbe` of an extracted disc) and remembers it from then on. Windows 10 or 11, 64-bit,
-nothing else to install.
+- **Stereoscopic 3D Window:** Renders 3D gameplay with true left/right eye parallax (`clip.x += eye * strength * (clip.w - focus)`) via dual-eye command replay in `SdlGpuDevice` and side-by-side OpenXR `XrCompositionLayerQuad` layers.
+- **Crisp Native Quad + Passthrough:** `1600×900` per eye, `4×` MSAA, `16×` anisotropic filtering, OpenXR `QUALITY_SUPER_SAMPLING_BIT_FB` + sharpening, Rec.709 color space, and full passthrough backdrop.
+- **Flat 2D HUD & Menus:** HUD elements, text, FMVs, and screen-space overlays stay pinned flat at zero disparity on the window plane.
+- **Touch Plus Controls & Haptics:** Native OpenXR input bindings and rumble.
 
-**Linux.** Unpack the tarball and run `./FuturamaRecomp <your futurama.iso>`. A Vulkan driver is all it needs.
+---
 
-It starts full screen at your screen's resolution, 4:3 with black bars; Alt+Enter toggles windowed mode. Options:
+## Installing & Playing on Quest 3
 
-| Option | Effect |
+1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.0.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
+   ```sh
+   adb install -r futurama-quest-v0.1.0.apk
+   ```
+2. Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe` folder) onto the headset in one of these locations:
+   - `/sdcard/Android/data/com.futuramarecomp.app/files/`
+   - `/sdcard/Futurama/`
+   - `/sdcard/Download/`
+3. Launch **Futurama** from **Unknown Sources** in your Quest library.
+
+### Quest Touch Plus Controls
+
+| Touch Plus Input | Xbox Controller / Action |
 | --- | --- |
-| `--windowed` | start in a window (1280x960) |
-| `--size 1920x1080` | the window size |
-| `--render-scale 1` | the original 640x480 picture scaled up (`2` = 1280x960, default `auto` = your screen) |
-| `--filter nearest` | crisp unfiltered pixels instead of smooth scaling |
-| `--aspect 16:9` | widescreen, up to super-ultrawide (`16:10`, `21:9`, `32:9`, any `w:h`, or `auto` = your screen's shape): more world at the sides, the HUD at the edges, movies and splashes centred (default `4:3`; see below) |
-| `--saves <folder>` | where saves go (default `%APPDATA%\FuturamaRecomp\saves`, or `~/.local/share/FuturamaRecomp/saves` on Linux) |
+| Left Stick / Right Stick | Left Stick / Right Stick |
+| A / B / X / Y | A / B / X / Y |
+| Left / Right Trigger | Left / Right Trigger |
+| Left / Right Grip (`LB` / `RB`) | White / Black |
+| Left / Right Stick Click (`L3` / `R3`) | Left / Right Thumb |
+| Left Menu Button | Start |
+| `LB + RB + Menu` | Back |
+| **`LB + RB + L3`** | **Toggle Stereoscopic 3D / Flat 2D live** |
+| **`L3 + R3`** | **Recenter theater window** |
 
-An Xbox controller just works, and so do most other pads (DualShock, DualSense, Switch Pro and the like), plugged in
-before or during play. No controller? The keyboard does it too (the physical keys, on any layout):
+---
 
-| Keys | Xbox pad |
-| --- | --- |
-| W A S D | left stick |
-| I J K L | right stick |
-| arrow keys | d-pad |
-| Space / E / Left Ctrl / R | A / B / X / Y |
-| Q / F | White / Black |
-| Z / Shift | left / right trigger |
-| Enter / Esc | Start / Back |
+## Building for Meta Quest (Android `arm64-v8a`)
 
-## Building
+Requires Android SDK (compileSdk 35, minSdk 29), NDK `28.2.13676358`, CMake `3.31.5`, JDK 17, and `glslangValidator` (only needed when regenerating SPIR-V shaders via `tools/compile_spirv_shaders.py`).
 
-**Windows.** You need Visual Studio 2022 with the "Desktop development with C++" workload and CMake 3.25 or newer.
-
+```sh
+cd android
+./gradlew assembleRelease
 ```
+
+The signed APK is written to `android/app/build/outputs/apk/release/app-release.apk`.
+
+<details>
+<summary>Desktop Builds (macOS Metal, Windows, Linux) & CLI Options</summary>
+
+### macOS (Apple Silicon / Metal)
+
+Requires Xcode Command Line Tools and CMake 3.25+. Uses SDL3's GPU API with Metal (`FUT_USE_SDL_GPU=ON`).
+
+```sh
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+```
+
+### Windows
+
+Requires Visual Studio 2022 ("Desktop development with C++") and CMake 3.25+:
+
+```sh
 cmake -S . -B build -G "Visual Studio 17 2022" -A x64
 cmake --build build --config Release
 ```
 
-**Linux.** You need GCC 13 or Clang 17, CMake 3.25, SDL3's build dependencies (the list in SDL's
-README-linux) and [DXVK-native](https://github.com/doitsujin/dxvk/releases) 3.1.1
-(`dxvk-native-3.1.1-steamrt-sniper.tar.gz`), extracted somewhere; point `FUT_DXVK_ROOT` at its `usr` folder. SDL3 is
-fetched and built by CMake on both platforms.
+### Linux
 
-```
+Requires GCC 13 or Clang 17, CMake 3.25, SDL3 dependencies, and [DXVK-native](https://github.com/doitsujin/dxvk/releases) 3.1.1:
+
+```sh
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DFUT_DXVK_ROOT=/path/to/dxvk/usr
 cmake --build build -j
 cmake --install build --prefix dist
 ```
 
-`dist/FuturamaRecomp` runs with SDL3 and DXVK's two libraries beside it; you need a Vulkan 1.3 driver.
+### Runtime Options
 
-**macOS.** You need Xcode Command Line Tools and CMake 3.25 or newer. SDL3 is found on the system (e.g. via Homebrew) or fetched and built by CMake; rendering uses Metal via SDL3's GPU API (`FUT_USE_SDL_GPU=ON` by default on macOS).
-
-```
-cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
-cmake --build build -j
-```
-
-**Meta Quest (OpenXR 3D Window).** Renders a stereoscopic 3D theater window over Quest passthrough (`1600x900` per eye, `4x` MSAA, `16x` AF, OpenXR quad supersampling) with Touch Plus input and haptics, keeping 2D HUD/menus flat on the window plane:
-
-- **Your disc image:** Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe`) to `/sdcard/Android/data/com.futuramarecomp.app/files/`, `/sdcard/Futurama/`, or `/sdcard/Download/`.
-- **Touch Plus shortcuts:** `L3 + R3` recenters the screen; `LB + RB + L3` (both grips + left stick click) toggles 3D / 2D live; `LB + RB + Menu` acts as Back.
-- **Building the APK:** Requires Android SDK (API 35), NDK 28.2, CMake 3.31.5, and JDK 17:
-```
-cd android && ./gradlew assembleRelease
-```
-
-Have fun!
-
-## Quality-of-life improvements
-
-- **🖥️ Render scaling.** The game's backend renderer faithfully upscales the scene quality dynamically based on the
-  resolution of your monitor. This results in a significantly sharper image with fewer artifacts. This default is
-  equivalent to `--render-scale auto`; `--render-scale 1` forces the original resolution.
-- **📺 Widescreen, ultrawide and super-ultrawide.** `--aspect 16:9` renders a wider picture: the same vertical
-  view with more world at the sides, the HUD anchored to the edges instead of stretched, movies and the 4:3 artwork
-  centred with black beside them. Any shape from 4:3 to 32:9 works: `16:10` (Steam Deck), `21:9` ultrawide, `32:9`
-  super-ultrawide, or any `w:h`; `auto` takes your screen's exact shape, which is the right choice for an ultrawide
-  (their real ratio is rarely the nominal 21:9). It's opt-in and stays off by default (4:3): the levels were
-  built for a 4:3 view, so you may see their edges, backdrops ending, or characters waiting off-stage. The 4:3
-  picture is untouched by it, byte for byte.
-- **⚡ 60 Hz for both discs.** The PAL version originally ran at 50 Hz. Regardless of which iso you supply (NTSC or PAL),
-  you'll get the improved 60 Hz experience.
-- **🌐 Revived the Language Menu from the PAL PS2 disc.** The European Xbox release takes its language from the console's settings. The
-  PS2 version has a language menu at start-up, and its graphics are still on the Xbox discs, so I ported it. Pick
-  English, French, German, Italian or Spanish and you get that language's text, speech and movies. The NTSC disc
-  only has English speech, so it stays English.
-- **🐛 A few of the original's bugs fixed.** The aim is 1:1, so any bug that changes what you see or how the game plays
-  stays in. The only ones I fixed are where the original's result comes down to luck (memory it never sets up) or
-  would crash the Xbox.
-
-<details>
-<summary>The original's bugs and what I did with them</summary>
-
-| Bug | Status |
-|---|---|
-| Dead enemies always fade away one second after dying, so longer death animations get cut off (most weasels) | Left original |
-| Spawning one kind of toxic warrior can hand the other kinds its shotgun | Left original |
-| Shots at some breakable objects ignore the object's rotation and can't hit one of its six sides | Left original |
-| The rat ride's steering is never reset, so riding it a second time starts with the old steering | Left original |
-| A script that turns a path point saves the wrong number as its angle | Left original |
-| A respawned enemy can skip planning its path and walk straight at you for a moment | Fixed |
-| A grenade trooper killed before it ever attacks throws its dying grenade in an unpredictable direction | Fixed |
-| A respawned weasel can copy the death animation of the weasel it replaced | Fixed |
-| A few enemies (the 2-5 tank, the 5-1 Destructor) start falling one frame late | Fixed |
-| Resetting the player can shift the player's model out of place | Fixed |
-| The lock-on marker's see-through level is random instead of half | Fixed |
-| The high priest (3-6) starts with a random summon timer and warp spot | Fixed |
-| A few enemies and the 4-1 rat ride can act on a sound that was never started | Fixed |
-| Settings missing from a config file get random values (the game's own files never miss any) | Fixed |
-| Objects start with a random count of how many frames since they were last drawn | Fixed |
-| Crashes only bad data could cause (missing objects, dividing by zero, broken files, running out of memory) | Fixed |
+| Option | Effect |
+| --- | --- |
+| `--windowed` / `--fullscreen` | Windowed (`1280×960`) or full screen |
+| `--size WxH` | Output resolution |
+| `--render-scale <auto\|0.25..16>` | Dynamic scene render scaling |
+| `--filter <linear\|nearest>` | Scaling filter |
+| `--aa <1\|2\|4\|8>` | MSAA sample count |
+| `--anisotropic <off\|2\|4\|8\|16>` | Anisotropic filtering |
+| `--aspect <auto\|4:3\|16:9\|16:10\|21:9\|w:h>` | Hor+ widescreen aspect ratio |
+| `--2d` / `--3d` | Start OpenXR quad in flat 2D or stereo 3D |
+| `--stereo-strength <float>` | Clip-space stereo parallax (default `0.022`) |
+| `--stereo-focus <float>` | Convergence plane depth in game units (default `12.0`) |
+| `--saves <dir>` | Custom save directory |
 
 </details>
 
-## Contributors
+---
 
-- [igno2k](https://github.com/igno2k)
+## Credits & Upstream
+
+- **Upstream Decompilation:** [hiburn8/Futurama-The-Game-The-Recomp](https://github.com/hiburn8/Futurama-The-Game-The-Recomp) ([CC0 1.0](LICENSE.md))
+- **Contributors:** [igno2k](https://github.com/igno2k)
+- **Quest 3 / OpenXR 3D Window & macOS Metal Port:** [mrchrisster](https://github.com/mrchrisster)
