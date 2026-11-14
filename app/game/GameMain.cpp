@@ -127,25 +127,27 @@ int main(int argc, char** argv) {
     using GpuDevice = render::xd3d::D3D11Device;
 #endif
 #ifdef FUT_USE_OPENXR
-    u32 width = 1280, height = 720;                   // OpenXR 2D theater quad texture size
+    u32 width = 2560, height = 1440;                  // OpenXR 2D theater quad texture size (1440p)
     bool fullscreen = false;
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
-    double aspect = 16.0 / 9.0;                       // 16:9 widescreen quad (854x480 -> 1280x720)
+    double aspect = 16.0 / 9.0;                       // 16:9 widescreen quad (854x480 -> 2560x1440)
+    u32 aaSamples = 4, anisotropy = 16;               // crisp 4x MSAA + 16x AF on Quest 3 quad
 #elif defined(__ANDROID__)
     u32 width = 1280, height = 960;                   // the windowed size (--size WxH)
     bool fullscreen = false;                          // Android/Quest OS manages the 2D panel surface
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
     double aspect = 0;                                // fill the Horizon OS 2D panel automatically
+    u32 aaSamples = 1, anisotropy = 1;                // (--aa / --anisotropic: the original sampling)
 #else
     u32 width = 1280, height = 960;                   // the windowed size (--size WxH)
     bool fullscreen = true;                           // (--size / --windowed: a window; --fullscreen: full screen)
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
     double aspect = 4.0 / 3.0;                        // (--aspect: the canvas's shape; 0 = auto, the window's)
-#endif
     u32 aaSamples = 1, anisotropy = 1;                // (--aa / --anisotropic: the original sampling)
+#endif
     std::filesystem::path saveDir = SaveFolder();     // (--saves <dir>)
     for (int i = hasSourceArg ? 2 : 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -225,7 +227,12 @@ int main(int argc, char** argv) {
 #else
     if (!device.Init(window.NativeHandle(), window.Width(), window.Height(), error)) return fail(error, 1);
 #endif
+#ifdef FUT_USE_OPENXR
+    while (aaSamples > 1 && !device.SetAntiAliasing(aaSamples, error)) aaSamples /= 2;
+    if (aaSamples == 1 && !device.SetAntiAliasing(1, error)) return fail(error, 1);
+#else
     if (!device.SetAntiAliasing(aaSamples, error)) return fail(error, 1);
+#endif
     if (!device.SetAnisotropy(anisotropy)) return fail("invalid anisotropic filtering value", 1);
     device.SetFilter(filter);
     render::nixbox::NiXBoxRenderer renderer(device);  // the factory 0x0014C200 (App+0x104)

@@ -54,6 +54,8 @@ struct OpenXrTheater::Impl {
     XrSessionState state = XR_SESSION_STATE_UNKNOWN;
     bool sessionRunning = false;
     bool passthroughExt = false;
+    bool colorSpaceExt = false;
+    bool layerSettingsExt = false;
 
     VkInstance vkInstance = VK_NULL_HANDLE;
     VkPhysicalDevice vkPhys = VK_NULL_HANDLE;
@@ -324,14 +326,14 @@ bool OpenXrTheater::Impl::CreateSwapchains(u32 w, u32 h, std::string& error) {
     xrEnumerateSwapchainFormats(session, fmtCount, &fmtCount, fmts.data());
     swapFormat = 0;
     for (int64_t f : fmts) {
-        if (f == VK_FORMAT_R8G8B8A8_UNORM) {
+        if (f == VK_FORMAT_R8G8B8A8_SRGB) {
             swapFormat = f;
             break;
         }
     }
     if (!swapFormat) {
         for (int64_t f : fmts) {
-            if (f == VK_FORMAT_R8G8B8A8_SRGB) {
+            if (f == VK_FORMAT_R8G8B8A8_UNORM) {
                 swapFormat = f;
                 break;
             }
@@ -754,6 +756,10 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error) {
     }
     d.passthroughExt = HasExt(exts, XR_FB_PASSTHROUGH_EXTENSION_NAME);
     if (d.passthroughExt) reqExts.push_back(XR_FB_PASSTHROUGH_EXTENSION_NAME);
+    d.colorSpaceExt = HasExt(exts, XR_FB_COLOR_SPACE_EXTENSION_NAME);
+    if (d.colorSpaceExt) reqExts.push_back(XR_FB_COLOR_SPACE_EXTENSION_NAME);
+    d.layerSettingsExt = HasExt(exts, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    if (d.layerSettingsExt) reqExts.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
 
     XrInstanceCreateInfoAndroidKHR icia{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     icia.applicationVM = vm;
@@ -824,9 +830,18 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error) {
         d.Destroy();
         return false;
     }
+    if (d.colorSpaceExt) {
+        PFN_xrSetColorSpaceFB pfnSetColorSpace = nullptr;
+        xrGetInstanceProcAddr(d.instance, "xrSetColorSpaceFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&pfnSetColorSpace));
+        if (pfnSetColorSpace) {
+            pfnSetColorSpace(d.session, XR_COLOR_SPACE_REC709_FB);
+        }
+    }
     d.InitPassthrough();
-    SDL_Log("OpenXR Theater Quad initialized (passthrough=%d, quad=%ux%u)",
-            (int)(d.passthroughLayer != XR_NULL_HANDLE), d.quadW, d.quadH);
+    SDL_Log("OpenXR Theater Quad initialized (passthrough=%d, quad=%ux%u, fmt=%lld, colorSpace=%d, layerSettings=%d)",
+            (int)(d.passthroughLayer != XR_NULL_HANDLE), d.quadW, d.quadH, (long long)d.swapFormat,
+            (int)d.colorSpaceExt, (int)d.layerSettingsExt);
     return true;
 }
 
@@ -1034,7 +1049,13 @@ void OpenXrTheater::EndFrame() {
     }
 
     XrCompositionLayerQuad quadLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    XrCompositionLayerSettingsFB quadSettings{XR_TYPE_COMPOSITION_LAYER_SETTINGS_FB};
     if (d.hasQuadFrame && d.frameState.shouldRender) {
+        if (d.layerSettingsExt) {
+            quadSettings.layerFlags = XR_COMPOSITION_LAYER_SETTINGS_QUALITY_SUPER_SAMPLING_BIT_FB |
+                                      XR_COMPOSITION_LAYER_SETTINGS_NORMAL_SHARPENING_BIT_FB;
+            quadLayer.next = &quadSettings;
+        }
         quadLayer.layerFlags = 0;
         quadLayer.space = d.localSpace;
         quadLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
