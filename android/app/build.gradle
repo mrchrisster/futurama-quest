@@ -7,6 +7,10 @@ android {
     compileSdk = 35
     ndkVersion = "28.2.13676358"
 
+    buildFeatures {
+        prefab = true
+    }
+
     defaultConfig {
         applicationId = "com.futuramarecomp.app"
         minSdk = 29
@@ -22,7 +26,8 @@ android {
             cmake {
                 arguments "-DANDROID_PLATFORM=android-29",
                           "-DANDROID_STL=c++_static",
-                          "-DFUT_USE_SDL_GPU=ON"
+                          "-DFUT_USE_SDL_GPU=ON",
+                          "-DFUT_USE_OPENXR=ON"
                 cFlags "-O2"
                 cppFlags "-O2"
                 abiFilters 'arm64-v8a'
@@ -59,4 +64,5 @@ android {
 
 dependencies {
     implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation 'org.khronos.openxr:openxr_loader_for_android:1.1.65'
 }

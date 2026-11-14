@@ -3,6 +3,7 @@
 
 #include "render/xd3d/XD3DDevice.h"
 
+#include <functional>
 #include <memory>
 #include <string>
 
@@ -24,6 +25,8 @@ public:
     bool SetSceneWorld(bool world) override;
     void SetRenderScale(double factor);
     double RenderScale() const;
+    using PresentCallback = std::function<void(const void* rgba, u32 width, u32 height)>;
+    void SetPresentCallback(PresentCallback cb);
     u32 draws() const { return draws_; }
 
     void Clear(u32 count, const D3DRECT* rects, u32 flags, u32 color, f32 z, u32 stencil) override;

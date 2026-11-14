@@ -62,6 +62,10 @@
 #else
 #include "render/xd3d/D3D11Device.h"
 #endif
+#ifdef FUT_USE_OPENXR
+#include "platform/xr/OpenXrTheater.h"
+#include <SDL3/SDL_timer.h>
+#endif
 #ifdef __ANDROID__
 #include <SDL3/SDL_main.h>
 #endif
@@ -122,13 +126,20 @@ int main(int argc, char** argv) {
 #else
     using GpuDevice = render::xd3d::D3D11Device;
 #endif
+#ifdef FUT_USE_OPENXR
+    u32 width = 1280, height = 720;                   // OpenXR 2D theater quad texture size
+    bool fullscreen = false;
+    GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
+    double renderScale = 0;                           // (--render-scale: 0 = auto)
+    double aspect = 16.0 / 9.0;                       // 16:9 widescreen quad (854x480 -> 1280x720)
+#elif defined(__ANDROID__)
     u32 width = 1280, height = 960;                   // the windowed size (--size WxH)
-#ifdef __ANDROID__
     bool fullscreen = false;                          // Android/Quest OS manages the 2D panel surface
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
     double aspect = 0;                                // fill the Horizon OS 2D panel automatically
 #else
+    u32 width = 1280, height = 960;                   // the windowed size (--size WxH)
     bool fullscreen = true;                           // (--size / --windowed: a window; --fullscreen: full screen)
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
@@ -183,20 +194,33 @@ int main(int argc, char** argv) {
     }
     const std::vector<u8>& xbeFile = xbe::GameImage().Bytes();
     platform::Window window;
+#ifdef FUT_USE_OPENXR
+    if (!window.Create("Futurama", 64, 64, false, false)) return fail("window creation failed", 1);
+    platform::OpenXrTheater xr;
+    if (!xr.Init(width, height, error)) return fail(error, 1);
+#else
     if (!window.Create("Futurama", width, height, false, fullscreen)) return fail("window creation failed", 1);
+#endif
 #if !defined(_WIN32) && !defined(FUT_USE_SDL_GPU)
     setenv("DXVK_WSI_DRIVER", "SDL3", 1);             // (DXVK-native: its window system is SDL3's; read at device creation)
 #endif
     GpuDevice device;                                 // the decompiled renderer's D3D8 stream, executed
     {   // the canvas (engine/ni/ScreenCanvas.h): 640 x 480, or round(480 x aspect) rounded to even, 4:3 .. 32:9
+#ifdef FUT_USE_OPENXR
+        if (aspect <= 0) aspect = double(width) / std::max(height, 1u);
+#else
         if (aspect <= 0) aspect = double(window.Width()) / std::max(window.Height(), 1u);
+#endif
         aspect = std::clamp(aspect, 4.0 / 3.0, 32.0 / 9.0);
         const u32 w = u32(std::lround(480.0 * aspect / 2.0) * 2);
         ni::ScreenCanvas::width = w;
         device.SetCanvasSize(w, ni::ScreenCanvas::kHeight);   // (before Init: the frame buffers are made at the size)
     }
     device.SetRenderScale(renderScale);               // (before Init: the targets are made at the scale)
-#ifdef FUT_USE_SDL_GPU
+#ifdef FUT_USE_OPENXR
+    if (!device.Init(nullptr, width, height, error)) return fail(error, 1);
+    device.SetPresentCallback([&](const void* rgba, u32 w, u32 h) { xr.PresentFrame(rgba, w, h); });
+#elif defined(FUT_USE_SDL_GPU)
     if (!device.Init(window.Handle(), window.Width(), window.Height(), error)) return fail(error, 1);
 #else
     if (!device.Init(window.NativeHandle(), window.Width(), window.Height(), error)) return fail(error, 1);
@@ -222,6 +246,10 @@ int main(int argc, char** argv) {
     if (soundOffline) soundBackend.InitOffline();
     std::vector<s32> soundDrop;
     auto finish = [&](int rc) {
+#ifdef FUT_USE_OPENXR
+        device.SetPresentCallback(nullptr);
+        xr.Shutdown();
+#endif
         return rc;
     };
     {
@@ -242,7 +270,19 @@ int main(int argc, char** argv) {
     sv.movies = &movies;
     sv.readPad = [&](u32 port) -> const input::GamepadState* {
         if (port != 0) return gamepads.State(port);
+#ifdef FUT_USE_OPENXR
+        pad0 = xr.Gamepad();
+        if (const input::GamepadState* ext = gamepads.State(0)) {
+            pad0.buttons |= ext->buttons;
+            for (int i = 0; i < 8; ++i) pad0.analog[i] = std::max(pad0.analog[i], ext->analog[i]);
+            if (std::abs(s32(ext->thumbLX)) > std::abs(s32(pad0.thumbLX))) pad0.thumbLX = ext->thumbLX;
+            if (std::abs(s32(ext->thumbLY)) > std::abs(s32(pad0.thumbLY))) pad0.thumbLY = ext->thumbLY;
+            if (std::abs(s32(ext->thumbRX)) > std::abs(s32(pad0.thumbRX))) pad0.thumbRX = ext->thumbRX;
+            if (std::abs(s32(ext->thumbRY)) > std::abs(s32(pad0.thumbRY))) pad0.thumbRY = ext->thumbRY;
+        }
+#else
         pad0 = gamepads.State(0) ? *gamepads.State(0) : platform::KeyboardGamepad(window);
+#endif
         return &pad0;
     };
     sv.deviceChanges = [&](u32& ins, u32& rem) { return gamepads.TakeChanges(ins, rem); };   // (XGetDeviceChanges)
@@ -255,9 +295,41 @@ int main(int argc, char** argv) {
     game::app::App app(sv);
     const u64 base = platform::Window::Counter();
     app.qpc = 0;                                      // (the clock counts from the start: QPC - base)
+#ifdef FUT_USE_OPENXR
+    app.input.onRumble = [&](const input::Pad& p) {
+        if (p.Port() == 0) xr.SetHaptics(p.motorLeft, p.motorRight);
+        gamepads.SetMotors(p.Port(), p.motorLeft, p.motorRight);
+    };
+#else
     app.input.onRumble = [&](const input::Pad& p) { gamepads.SetMotors(p.Port(), p.motorLeft, p.motorRight); };
+#endif
     const char* startLevel = nullptr;                 // (null = the boot)
     if (!app.Init(startLevel)) return fail("App::Init failed", 1);
+#ifdef FUT_USE_OPENXR
+    for (s32 f = 0; window.Pump();) {
+        bool xrQuit = false;
+        xr.PollEvents(xrQuit);
+        if (xrQuit) break;
+        if (!xr.IsSessionRunning()) {
+            SDL_Delay(16);
+            continue;
+        }
+        if (!xr.BeginFrame()) {
+            SDL_Delay(8);
+            continue;
+        }
+        gamepads.Poll();                              // (keep BT pads working alongside Quest Touch Plus)
+        app.frame = f++;
+        app.qpc = platform::Window::Counter() - base;
+        const bool keepGoing = app.Frame();
+        xr.EndFrame();
+        if (!keepGoing) break;                        // (the App quits: no context requested)
+        if (soundOffline) {                           // (offline: the published state rendered and dropped)
+            soundDrop.clear();
+            soundBackend.RenderFrames(25 * app.lastSteps, soundDrop);   // 800 samples per 1/60 s step
+        }
+    }
+#else
     for (s32 f = 0; window.Pump(); ++f) {
         if (window.Resized()) device.Resize(window.Width(), window.Height());   // (the swap chain follows the window)
         gamepads.Poll();                              // (Input_Update reads the pads through readPad every step)
@@ -270,5 +342,6 @@ int main(int argc, char** argv) {
             soundBackend.RenderFrames(25 * app.lastSteps, soundDrop);   // 800 samples per 1/60 s step
         }
     }
+#endif
     return finish(0);
 }

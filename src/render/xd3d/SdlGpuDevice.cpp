@@ -182,6 +182,9 @@ struct SdlGpuDevice::Impl {
 
     SDL_GPUTransferBuffer* texTransferBuf = nullptr;
     u32 texTransferCapacity = 0;
+    SDL_GPUTransferBuffer* downloadBuf = nullptr;
+    u32 downloadCapacity = 0;
+    PresentCallback onPresent;
 
     u32 windowWidth = 0;
     u32 windowHeight = 0;
@@ -885,6 +888,7 @@ void SdlGpuDevice::Impl::Destroy() {
     if (ib) SDL_ReleaseGPUBuffer(gpu, ib);
     if (transferBuf) SDL_ReleaseGPUTransferBuffer(gpu, transferBuf);
     if (texTransferBuf) SDL_ReleaseGPUTransferBuffer(gpu, texTransferBuf);
+    if (downloadBuf) SDL_ReleaseGPUTransferBuffer(gpu, downloadBuf);
     if (vs) SDL_ReleaseGPUShader(gpu, vs);
     if (ps) SDL_ReleaseGPUShader(gpu, ps);
     if (clearVs) SDL_ReleaseGPUShader(gpu, clearVs);
@@ -1067,6 +1071,41 @@ void SdlGpuDevice::Swap(u32 flags) {
 
     d.Flush();
 
+    if (d.onPresent && bb->physicalWidth && bb->physicalHeight) {
+        const u32 bytes = bb->physicalWidth * bb->physicalHeight * 4;
+        if (!d.downloadBuf || d.downloadCapacity < bytes) {
+            if (d.downloadBuf) SDL_ReleaseGPUTransferBuffer(d.gpu, d.downloadBuf);
+            SDL_GPUTransferBufferCreateInfo tbi = {};
+            tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
+            tbi.size = bytes;
+            d.downloadBuf = SDL_CreateGPUTransferBuffer(d.gpu, &tbi);
+            d.downloadCapacity = d.downloadBuf ? bytes : 0;
+        }
+        if (d.downloadBuf) {
+            SDL_GPUCommandBuffer* dlCmd = SDL_AcquireGPUCommandBuffer(d.gpu);
+            if (dlCmd) {
+                SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(dlCmd);
+                SDL_GPUTextureRegion src = {};
+                src.texture = bb->tex;
+                src.w = bb->physicalWidth;
+                src.h = bb->physicalHeight;
+                src.d = 1;
+                SDL_GPUTextureTransferInfo dst = {};
+                dst.transfer_buffer = d.downloadBuf;
+                SDL_DownloadFromGPUTexture(cp, &src, &dst);
+                SDL_EndGPUCopyPass(cp);
+                if (SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(dlCmd)) {
+                    SDL_WaitForGPUFences(d.gpu, true, &fence, 1);
+                    SDL_ReleaseGPUFence(d.gpu, fence);
+                    if (void* px = SDL_MapGPUTransferBuffer(d.gpu, d.downloadBuf, false)) {
+                        d.onPresent(px, bb->physicalWidth, bb->physicalHeight);
+                        SDL_UnmapGPUTransferBuffer(d.gpu, d.downloadBuf);
+                    }
+                }
+            }
+        }
+    }
+
     if (!d.window) return;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(d.gpu);
     if (!cmd) return;
@@ -1111,6 +1150,8 @@ void SdlGpuDevice::Resize(u32 width, u32 height) {
 }
 
 void SdlGpuDevice::SetFilter(Filter filter) { impl_->filter = filter; }
+
+void SdlGpuDevice::SetPresentCallback(PresentCallback cb) { impl_->onPresent = std::move(cb); }
 
 bool SdlGpuDevice::SetAnisotropy(u32 value) {
     if (!ValidAnisotropy(value)) return false;
@@ -1184,7 +1225,7 @@ void SdlGpuDevice::SetRenderScale(double factor) {
     if (!d.gpu) return;
     if (!d.autoScale) {
         d.ApplyScale(d.fixedScale, d.fixedScale);
-    } else if (d.window) {
+    } else if (d.windowWidth && d.windowHeight) {
         const Resource* bb = backBuffer();
         const u32 w = std::max(bb->width, 1u), h = std::max(bb->height, 1u);
         const double s = std::min(double(d.windowWidth) / w, double(d.windowHeight) / h);

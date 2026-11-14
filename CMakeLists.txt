@@ -31,6 +31,7 @@ else()
     set(_FUT_DEFAULT_SDL_GPU OFF)
 endif()
 option(FUT_USE_SDL_GPU "Use the SDL3 GPU backend (Metal) instead of D3D11/DXVK" ${_FUT_DEFAULT_SDL_GPU})
+option(FUT_USE_OPENXR "Render via OpenXR 2D theater quad (Meta Quest)" OFF)
 
 # SDL3 (the window, input and clock layer), linked statically: a system SDL3 when CMake finds one, else the pinned
 # release fetched at configure time.
@@ -189,6 +190,7 @@ add_library(fut_render STATIC
     src/platform/sdl/SdlSoundBackend.cpp
     src/platform/sdl/MovieService.cpp
     src/render/TextureDecode.cpp
+    $<$<BOOL:${FUT_USE_OPENXR}>:src/platform/xr/OpenXrTheater.cpp>
     $<IF:$<BOOL:${FUT_USE_SDL_GPU}>,src/render/xd3d/SdlGpuDevice.cpp,src/render/xd3d/D3D11Device.cpp>
 )
 target_include_directories(fut_render PRIVATE src)
@@ -196,6 +198,14 @@ if(FUT_USE_SDL_GPU)
     target_compile_definitions(fut_render PUBLIC FUT_USE_SDL_GPU)
 elseif(NOT WIN32)
     target_include_directories(fut_render PUBLIC "${DXVK_DIRECTX_INCLUDE_DIR}" "${DXVK_WINDOWS_INCLUDE_DIR}")
+endif()
+if(FUT_USE_OPENXR)
+    target_compile_definitions(fut_render PUBLIC FUT_USE_OPENXR)
+    find_package(OpenXR REQUIRED CONFIG)
+    target_link_libraries(fut_render PUBLIC OpenXR::openxr_loader)
+    if(ANDROID)
+        target_link_libraries(fut_render PUBLIC vulkan log)
+    endif()
 endif()
 target_link_libraries(fut_render PUBLIC $<IF:$<BOOL:${WIN32}>,SDL3::SDL3-static,$<IF:$<BOOL:${FUT_USE_SDL_GPU}>,SDL3::SDL3,SDL3::SDL3-shared>> fut_core)
 
