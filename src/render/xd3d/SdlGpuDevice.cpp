@@ -134,11 +134,34 @@ SDL_GPUSamplerAddressMode Address(u32 v) {
     }
 }
 
+SDL_GPUSampleCount ToSampleCount(u32 samples) {
+    switch (samples) {
+    case 2: return SDL_GPU_SAMPLECOUNT_2;
+    case 4: return SDL_GPU_SAMPLECOUNT_4;
+    case 8: return SDL_GPU_SAMPLECOUNT_8;
+    default: return SDL_GPU_SAMPLECOUNT_1;
+    }
+}
+
+bool ValidAnisotropy(u32 value) {
+    return value == 1 || value == 2 || value == 4 || value == 8 || value == 16;
+}
+
+u32 StageAnisotropy(const Resource& texture, const u32* state, u32 anisotropy, bool world, bool hud, bool rhw) {
+    if (!world || hud || rhw || texture.rendered || texture.format == 0x24 || texture.levels < 2) return 1;
+    if (state[TSS_MAGFILTER] < 2 || state[TSS_MINFILTER] < 2 || state[TSS_MIPFILTER] < 2) return 1;
+    return anisotropy;
+}
+
 }  // namespace
 
 struct SdlGpuDevice::Impl {
     SDL_GPUDevice* gpu = nullptr;
     SDL_Window* window = nullptr;
+    Resource* sceneColor = nullptr;
+    Resource* sceneDepth = nullptr;
+    u32 anisotropy = 1, aaSamples = 1;
+    bool sceneWorld = false;
     SDL_GPUTextureFormat colorFormat = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     SDL_GPUTextureFormat depthFormat = SDL_GPU_TEXTUREFORMAT_D32_FLOAT_S8_UINT;
 
@@ -171,9 +194,11 @@ struct SdlGpuDevice::Impl {
 
     struct Target {
         SDL_GPUTexture* tex = nullptr;
+        SDL_GPUTexture* multisample = nullptr;
         u32 width = 0, height = 0;
         u32 physicalWidth = 0, physicalHeight = 0;
-        bool depth = false;
+        u32 samples = 1;
+        bool depth = false, scene = false;
     };
     std::unordered_map<const Resource*, Target> targets;
 
@@ -227,7 +252,7 @@ struct SdlGpuDevice::Impl {
     std::vector<u32> scratchIdx;
 
     static u32 Physical(u32 logical, double scale) { return std::max(u32(std::lround(logical * scale)), 1u); }
-    bool MakeTarget(const Resource* key, bool depth, Target& t);
+    bool MakeTarget(const Resource* key, bool depth, Target& t, u32 samples = 0);
     void ApplyScale(double sx, double sy);
     Target* ColorTarget(Resource* r);
     Target* DepthTarget(Resource* r);
@@ -236,10 +261,11 @@ struct SdlGpuDevice::Impl {
     SDL_GPUShader* LoadShader(const char* entry, SDL_GPUShaderStage stage, u32 numSamplers, u32 numUniforms,
                               std::string& error);
     SDL_GPUGraphicsPipeline* GetDrawPipeline(const std::vector<u32>& key, SDL_GPUPrimitiveType topo, bool hasDepth,
-                                             const u32* rs);
-    SDL_GPUGraphicsPipeline* GetClearPipeline(bool hasDepth, bool writeColor, bool writeDepth, bool writeStencil);
-    SDL_GPUGraphicsPipeline* GetBlitPipeline(SDL_GPUTextureFormat fmt);
-    SDL_GPUSampler* GetSampler(const u32* ts);
+                                             const u32* rs, u32 samples, bool alphaToCoverage);
+    SDL_GPUGraphicsPipeline* GetClearPipeline(bool hasDepth, bool writeColor, bool writeDepth, bool writeStencil,
+                                              u32 samples);
+    SDL_GPUGraphicsPipeline* GetBlitPipeline(SDL_GPUTextureFormat fmt, SDL_GPUSampleCount sc = SDL_GPU_SAMPLECOUNT_1);
+    SDL_GPUSampler* GetSampler(const u32* ts, u32 stageAnisotropy);
 
     bool UploadTextureData(SDL_GPUTexture* tex, u32 width, u32 height, u32 level, const void* data, u32 bytes);
     SDL_GPUTexture* Texture(Resource* r);
@@ -303,28 +329,44 @@ bool SdlGpuDevice::Impl::UploadTextureData(SDL_GPUTexture* tex, u32 width, u32 h
     return SDL_SubmitGPUCommandBuffer(cmd);
 }
 
-bool SdlGpuDevice::Impl::MakeTarget(const Resource* key, bool depth, Target& t) {
+bool SdlGpuDevice::Impl::MakeTarget(const Resource* key, bool depth, Target& t, u32 samples) {
     t.depth = depth;
+    t.scene = key == (depth ? sceneDepth : sceneColor);
     t.width = std::max(key->width, 1u);
     t.height = std::max(key->height, 1u);
     t.physicalWidth = Physical(t.width, scaleX);
     t.physicalHeight = Physical(t.height, scaleY);
+    t.samples = t.scene ? (samples ? samples : aaSamples) : 1;
+    const SDL_GPUSampleCount sc = ToSampleCount(t.samples);
     SDL_GPUTextureCreateInfo ti = {};
     ti.type = SDL_GPU_TEXTURETYPE_2D;
     ti.width = t.physicalWidth;
     ti.height = t.physicalHeight;
     ti.layer_count_or_depth = 1;
     ti.num_levels = 1;
-    ti.sample_count = SDL_GPU_SAMPLECOUNT_1;
     if (depth) {
         ti.format = depthFormat;
         ti.usage = SDL_GPU_TEXTUREUSAGE_DEPTH_STENCIL_TARGET;
-    } else {
-        ti.format = colorFormat;
-        ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+        ti.sample_count = sc;
+        t.tex = SDL_CreateGPUTexture(gpu, &ti);
+        return t.tex != nullptr;
     }
+    ti.format = colorFormat;
+    ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET | SDL_GPU_TEXTUREUSAGE_SAMPLER;
+    ti.sample_count = SDL_GPU_SAMPLECOUNT_1;
     t.tex = SDL_CreateGPUTexture(gpu, &ti);
-    return t.tex != nullptr;
+    if (!t.tex) return false;
+    if (t.samples > 1) {
+        ti.usage = SDL_GPU_TEXTUREUSAGE_COLOR_TARGET;
+        ti.sample_count = sc;
+        t.multisample = SDL_CreateGPUTexture(gpu, &ti);
+        if (!t.multisample) {
+            SDL_ReleaseGPUTexture(gpu, t.tex);
+            t.tex = nullptr;
+            return false;
+        }
+    }
+    return true;
 }
 
 SdlGpuDevice::Impl::Target* SdlGpuDevice::Impl::ColorTarget(Resource* r) {
@@ -339,11 +381,12 @@ SdlGpuDevice::Impl::Target* SdlGpuDevice::Impl::ColorTarget(Resource* r) {
 
 SdlGpuDevice::Impl::Target* SdlGpuDevice::Impl::DepthTarget(Resource* r) {
     if (!r) return nullptr;
-    auto it = targets.find(r);
+    const Resource* key = r->parent ? r->parent : r;
+    auto it = targets.find(key);
     if (it != targets.end()) return &it->second;
     Target t;
-    if (!MakeTarget(r, true, t)) return nullptr;
-    return &(targets[r] = t);
+    if (!MakeTarget(key, true, t)) return nullptr;
+    return &(targets[key] = t);
 }
 
 void SdlGpuDevice::Impl::ApplyScale(double sx, double sy) {
@@ -354,16 +397,22 @@ void SdlGpuDevice::Impl::ApplyScale(double sx, double sy) {
 
     std::vector<SDL_GPUTexture*> toRelease;
     SDL_GPUCommandBuffer* cmd = SDL_AcquireGPUCommandBuffer(gpu);
-    SDL_GPUGraphicsPipeline* pipe = GetBlitPipeline(colorFormat);
 
     for (auto& [key, old] : targets) {
         Target t;
         if (!MakeTarget(key, old.depth, t)) continue;
+        SDL_GPUGraphicsPipeline* pipe = GetBlitPipeline(colorFormat, ToSampleCount(t.samples));
         if (!old.depth && old.tex && t.tex && cmd && pipe) {
             SDL_GPUColorTargetInfo ci = {};
-            ci.texture = t.tex;
             ci.load_op = SDL_GPU_LOADOP_DONT_CARE;
-            ci.store_op = SDL_GPU_STOREOP_STORE;
+            if (t.multisample) {
+                ci.texture = t.multisample;
+                ci.resolve_texture = t.tex;
+                ci.store_op = SDL_GPU_STOREOP_RESOLVE_AND_STORE;
+            } else {
+                ci.texture = t.tex;
+                ci.store_op = SDL_GPU_STOREOP_STORE;
+            }
             SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ci, 1, nullptr);
             SDL_BindGPUGraphicsPipeline(rp, pipe);
             SDL_GPUViewport vp{0.0f, 0.0f, f32(t.physicalWidth), f32(t.physicalHeight), 0.0f, 1.0f};
@@ -374,14 +423,16 @@ void SdlGpuDevice::Impl::ApplyScale(double sx, double sy) {
             SDL_EndGPURenderPass(rp);
         }
         if (old.tex) toRelease.push_back(old.tex);
+        if (old.multisample) toRelease.push_back(old.multisample);
         old = t;
     }
     if (cmd) SDL_SubmitGPUCommandBuffer(cmd);
     for (SDL_GPUTexture* tex : toRelease) SDL_ReleaseGPUTexture(gpu, tex);
 }
 
-SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetBlitPipeline(SDL_GPUTextureFormat fmt) {
-    auto& p = blitPipelines[u32(fmt)];
+SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetBlitPipeline(SDL_GPUTextureFormat fmt, SDL_GPUSampleCount sc) {
+    const u32 key = (u32(fmt) << 4) | u32(sc);
+    auto& p = blitPipelines[key];
     if (p) return p;
     SDL_GPUColorTargetDescription ctd = {};
     ctd.format = fmt;
@@ -393,7 +444,7 @@ SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetBlitPipeline(SDL_GPUTextureForma
     pci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     pci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
     pci.rasterizer_state.enable_depth_clip = true;
-    pci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    pci.multisample_state.sample_count = sc;
     pci.target_info.color_target_descriptions = &ctd;
     pci.target_info.num_color_targets = 1;
     p = SDL_CreateGPUGraphicsPipeline(gpu, &pci);
@@ -401,8 +452,9 @@ SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetBlitPipeline(SDL_GPUTextureForma
 }
 
 SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetClearPipeline(bool hasDepth, bool writeColor, bool writeDepth,
-                                                              bool writeStencil) {
-    const u32 key = (u32(hasDepth) << 0) | (u32(writeColor) << 1) | (u32(writeDepth) << 2) | (u32(writeStencil) << 3);
+                                                              bool writeStencil, u32 samples) {
+    const u32 key = (u32(hasDepth) << 0) | (u32(writeColor) << 1) | (u32(writeDepth) << 2) | (u32(writeStencil) << 3) |
+                    (samples << 4);
     auto& p = clearPipelines[key];
     if (p) return p;
 
@@ -421,7 +473,7 @@ SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetClearPipeline(bool hasDepth, boo
     pci.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
     pci.rasterizer_state.front_face = SDL_GPU_FRONTFACE_CLOCKWISE;
     pci.rasterizer_state.enable_depth_clip = true;
-    pci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    pci.multisample_state.sample_count = ToSampleCount(samples);
     pci.depth_stencil_state.enable_depth_test = hasDepth && writeDepth;
     pci.depth_stencil_state.enable_depth_write = hasDepth && writeDepth;
     pci.depth_stencil_state.compare_op = SDL_GPU_COMPAREOP_ALWAYS;
@@ -441,7 +493,8 @@ SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetClearPipeline(bool hasDepth, boo
 }
 
 SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetDrawPipeline(const std::vector<u32>& key, SDL_GPUPrimitiveType topo,
-                                                             bool hasDepth, const u32* rs) {
+                                                             bool hasDepth, const u32* rs, u32 samples,
+                                                             bool alphaToCoverage) {
     auto& p = pipelines[key];
     if (p) return p;
 
@@ -495,7 +548,8 @@ SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetDrawPipeline(const std::vector<u
     }
     rz.enable_depth_clip = true;
 
-    pci.multisample_state.sample_count = SDL_GPU_SAMPLECOUNT_1;
+    pci.multisample_state.sample_count = ToSampleCount(samples);
+    pci.multisample_state.enable_alpha_to_coverage = alphaToCoverage;
 
     if (hasDepth) {
         auto& ds = pci.depth_stencil_state;
@@ -520,10 +574,10 @@ SDL_GPUGraphicsPipeline* SdlGpuDevice::Impl::GetDrawPipeline(const std::vector<u
     return p;
 }
 
-SDL_GPUSampler* SdlGpuDevice::Impl::GetSampler(const u32* ts) {
+SDL_GPUSampler* SdlGpuDevice::Impl::GetSampler(const u32* ts, u32 stageAnisotropy) {
     std::vector<u32> key = {
         ts[TSS_ADDRESSU], ts[TSS_ADDRESSV], ts[TSS_ADDRESSW], ts[TSS_MAGFILTER], ts[TSS_MINFILTER],
-        ts[TSS_MIPFILTER], ts[TSS_MIPMAPLODBIAS], ts[TSS_MAXMIPLEVEL]
+        ts[TSS_MIPFILTER], ts[TSS_MIPMAPLODBIAS], ts[TSS_MAXMIPLEVEL], stageAnisotropy
     };
     auto& sp = samplers[key];
     if (sp) return sp;
@@ -537,6 +591,8 @@ SDL_GPUSampler* SdlGpuDevice::Impl::GetSampler(const u32* ts) {
     si.mip_lod_bias = AsFloat(ts[TSS_MIPMAPLODBIAS]);
     si.min_lod = f32(ts[TSS_MAXMIPLEVEL]);
     si.max_lod = ts[TSS_MIPFILTER] == 0 ? si.min_lod : 1000.0f;
+    si.enable_anisotropy = stageAnisotropy > 1;
+    si.max_anisotropy = f32(stageAnisotropy);
     sp = SDL_CreateGPUSampler(gpu, &si);
     return sp ? sp : defaultSampler;
 }
@@ -724,13 +780,20 @@ void SdlGpuDevice::Impl::Flush() {
     for (const PassRecord& pass : passes) {
         if (!pass.ct || !pass.ct->tex) continue;
         SDL_GPUColorTargetInfo ci = {};
-        ci.texture = pass.ct->tex;
         ci.load_op = pass.colorLoadOp;
-        ci.store_op = SDL_GPU_STOREOP_STORE;
         ci.clear_color = pass.clearColor;
+        if (pass.ct->multisample) {
+            ci.texture = pass.ct->multisample;
+            ci.resolve_texture = pass.ct->tex;
+            ci.store_op = SDL_GPU_STOREOP_RESOLVE_AND_STORE;
+        } else {
+            ci.texture = pass.ct->tex;
+            ci.store_op = SDL_GPU_STOREOP_STORE;
+        }
 
+        const bool useDepth = pass.dt && pass.dt->tex && pass.dt->samples == pass.ct->samples;
         SDL_GPUDepthStencilTargetInfo di = {};
-        if (pass.dt && pass.dt->tex) {
+        if (useDepth) {
             di.texture = pass.dt->tex;
             di.load_op = pass.depthLoadOp;
             di.store_op = SDL_GPU_STOREOP_STORE;
@@ -740,7 +803,7 @@ void SdlGpuDevice::Impl::Flush() {
             di.clear_stencil = pass.clearStencil;
         }
 
-        SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ci, 1, (pass.dt && pass.dt->tex) ? &di : nullptr);
+        SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ci, 1, useDepth ? &di : nullptr);
         for (const DrawItem& item : pass.items) {
             if (!item.pipeline) continue;
             SDL_BindGPUGraphicsPipeline(rp, item.pipeline);
@@ -783,7 +846,10 @@ void SdlGpuDevice::Impl::Destroy() {
     for (auto& [k, s] : samplers) if (s) SDL_ReleaseGPUSampler(gpu, s);
     for (SDL_GPUSampler* s : blitSamplers) if (s) SDL_ReleaseGPUSampler(gpu, s);
     if (defaultSampler) SDL_ReleaseGPUSampler(gpu, defaultSampler);
-    for (auto& [k, t] : targets) if (t.tex) SDL_ReleaseGPUTexture(gpu, t.tex);
+    for (auto& [k, t] : targets) {
+        if (t.tex) SDL_ReleaseGPUTexture(gpu, t.tex);
+        if (t.multisample) SDL_ReleaseGPUTexture(gpu, t.multisample);
+    }
     for (auto& [k, t] : textures) if (t.texture && t.texture != white) SDL_ReleaseGPUTexture(gpu, t.texture);
     if (white) SDL_ReleaseGPUTexture(gpu, white);
     if (vb) SDL_ReleaseGPUBuffer(gpu, vb);
@@ -807,6 +873,8 @@ SdlGpuDevice::~SdlGpuDevice() { impl_->Destroy(); }
 
 bool SdlGpuDevice::Init(SDL_Window* window, u32 width, u32 height, std::string& error) {
     Impl& d = *impl_;
+    d.sceneColor = backBuffer();
+    d.sceneDepth = depthBuffer();
     d.window = window;
     d.windowWidth = std::max(width, 1u);
     d.windowHeight = std::max(height, 1u);
@@ -939,15 +1007,16 @@ void SdlGpuDevice::Clear(u32 count, const D3DRECT* rects, u32 flags, u32 color, 
         return;
     }
 
+    const bool useDepth = dt != nullptr && dt->samples == ct->samples;
     const bool writeColor = (flags & 0xF0) != 0;
-    const bool writeDepth = ((flags & 1) != 0) && dt != nullptr;
-    const bool writeStencil = ((flags & 2) != 0) && dt != nullptr;
+    const bool writeDepth = ((flags & 1) != 0) && useDepth;
+    const bool writeStencil = ((flags & 2) != 0) && useDepth;
     if (!writeColor && !writeDepth && !writeStencil) return;
 
     Impl::PassRecord& pass = d.ActivePass(ct, dt, ctKey);
     Impl::DrawItem item;
     item.isClearQuad = true;
-    item.pipeline = d.GetClearPipeline(dt != nullptr, writeColor, writeDepth, writeStencil);
+    item.pipeline = d.GetClearPipeline(useDepth, writeColor, writeDepth, writeStencil, ct->samples);
     item.viewport = {0.0f, 0.0f, f32(ct->physicalWidth), f32(ct->physicalHeight), 0.0f, 1.0f};
     item.stencilRef = u8(stencil);
     item.clearCB.rect[0] = f32(r.x1) / ct->width * 2.0f - 1.0f;
@@ -1010,6 +1079,71 @@ void SdlGpuDevice::Resize(u32 width, u32 height) {
 }
 
 void SdlGpuDevice::SetFilter(Filter filter) { impl_->filter = filter; }
+
+bool SdlGpuDevice::SetAnisotropy(u32 value) {
+    if (!ValidAnisotropy(value)) return false;
+    impl_->anisotropy = value;
+    return true;
+}
+
+bool SdlGpuDevice::SetAntiAliasing(u32 samples, std::string& error) {
+    Impl& d = *impl_;
+    if (samples != 1 && samples != 2 && samples != 4 && samples != 8) {
+        error = "scene MSAA must be 1, 2, 4 or 8 samples";
+        return false;
+    }
+    if (!d.gpu) {
+        error = "SDL_GPU device is not initialised";
+        return false;
+    }
+    if (samples == d.aaSamples) {
+        error.clear();
+        return true;
+    }
+    const SDL_GPUSampleCount sc = ToSampleCount(samples);
+    if (!SDL_GPUTextureSupportsSampleCount(d.gpu, d.colorFormat, sc) ||
+        !SDL_GPUTextureSupportsSampleCount(d.gpu, d.depthFormat, sc)) {
+        error = "scene MSAA sample count is unsupported for colour/depth";
+        return false;
+    }
+    d.Flush();
+    SDL_WaitForGPUIdle(d.gpu);
+    Impl::Target color, depth;
+    if (!d.MakeTarget(d.sceneColor, false, color, samples) ||
+        !d.MakeTarget(d.sceneDepth, true, depth, samples)) {
+        if (color.tex) SDL_ReleaseGPUTexture(d.gpu, color.tex);
+        if (color.multisample) SDL_ReleaseGPUTexture(d.gpu, color.multisample);
+        if (depth.tex) SDL_ReleaseGPUTexture(d.gpu, depth.tex);
+        error = "scene MSAA colour/depth allocation failed";
+        return false;
+    }
+    auto releaseTarget = [&](Impl::Target& t) {
+        if (t.tex) SDL_ReleaseGPUTexture(d.gpu, t.tex);
+        if (t.multisample) SDL_ReleaseGPUTexture(d.gpu, t.multisample);
+        t.tex = t.multisample = nullptr;
+    };
+    if (auto it = d.targets.find(d.sceneColor); it != d.targets.end()) {
+        releaseTarget(it->second);
+        it->second = color;
+    } else {
+        d.targets[d.sceneColor] = color;
+    }
+    if (auto it = d.targets.find(d.sceneDepth); it != d.targets.end()) {
+        releaseTarget(it->second);
+        it->second = depth;
+    } else {
+        d.targets[d.sceneDepth] = depth;
+    }
+    d.aaSamples = samples;
+    error.clear();
+    return true;
+}
+
+bool SdlGpuDevice::SetSceneWorld(bool world) {
+    const bool previous = impl_->sceneWorld;
+    impl_->sceneWorld = world;
+    return previous;
+}
 
 void SdlGpuDevice::SetRenderScale(double factor) {
     Impl& d = *impl_;
@@ -1216,7 +1350,8 @@ void SdlGpuDevice::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
                 cb.texScale[s][2] = rs[RS_YUVENABLE] != 0 ? 1.0f : 0.0f;
             }
             if (gtex) bindings[s].texture = gtex;
-            bindings[s].sampler = d.GetSampler(ts);
+            const u32 stageAniso = StageAnisotropy(*t, ts, d.anisotropy, d.sceneWorld, hudTextures[s], rhw);
+            bindings[s].sampler = d.GetSampler(ts, stageAniso);
         }
     }
 
@@ -1238,8 +1373,11 @@ void SdlGpuDevice::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
     }
     cb.lightCount[0] = s32(nl);
 
+    const bool useDepth = dt != nullptr && dt->samples == ct->samples;
+    const bool sceneMsaa = d.aaSamples > 1 && ct->scene;
+    const bool alphaToCoverage = sceneMsaa && d.sceneWorld && rs[RS_ALPHATESTENABLE] != 0;
     const std::vector<u32> pkey = {
-        u32(topo), u32(dt != nullptr),
+        u32(topo), u32(useDepth), ct->samples, u32(alphaToCoverage),
         rs[RS_ALPHABLENDENABLE], rs[RS_SRCBLEND], rs[RS_DESTBLEND], rs[RS_BLENDOP], rs[RS_COLORWRITEENABLE],
         rs[RS_ZENABLE], rs[RS_ZWRITEENABLE], rs[RS_ZFUNC], rs[RS_STENCILENABLE], rs[RS_STENCILFUNC],
         rs[RS_STENCILMASK], rs[RS_STENCILWRITEMASK], rs[RS_STENCILFAIL], rs[RS_STENCILZFAIL], rs[RS_STENCILPASS],
@@ -1256,7 +1394,7 @@ void SdlGpuDevice::Draw(u32 primitive, const u16* list, u32 count, u32 start) {
     Impl::PassRecord& pass = d.ActivePass(ct, dt, ctKey);
 
     Impl::DrawItem item;
-    item.pipeline = d.GetDrawPipeline(pkey, topo, dt != nullptr, rs);
+    item.pipeline = d.GetDrawPipeline(pkey, topo, useDepth, rs, ct->samples, alphaToCoverage);
     const f32 sx = f32(ct->physicalWidth) / ct->width, sy = f32(ct->physicalHeight) / ct->height;
     item.viewport = {viewport.X * sx, viewport.Y * sy, viewport.Width * sx, viewport.Height * sy,
                      viewport.MinZ, viewport.MaxZ};

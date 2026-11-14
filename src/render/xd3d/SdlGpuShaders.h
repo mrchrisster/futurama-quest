@@ -75,10 +75,10 @@ struct VSOut {
     float4 fd0 [[flat]];
     float4 fd1 [[flat]];
     float4 fog;
-    float4 t0;
-    float4 t1;
-    float4 t2;
-    float4 t3;
+    float4 t0 [[centroid_perspective]];
+    float4 t1 [[centroid_perspective]];
+    float4 t2 [[centroid_perspective]];
+    float4 t3 [[centroid_perspective]];
 };
 
 inline float4 SourceColor(int s, float4 vertexColor, float4 material, float4 misc2) {

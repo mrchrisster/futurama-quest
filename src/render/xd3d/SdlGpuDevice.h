@@ -19,6 +19,9 @@ public:
     void Resize(u32 width, u32 height);
     enum class Filter { Linear, Nearest };
     void SetFilter(Filter filter);
+    bool SetAnisotropy(u32 value);
+    bool SetAntiAliasing(u32 samples, std::string& error);
+    bool SetSceneWorld(bool world) override;
     void SetRenderScale(double factor);
     double RenderScale() const;
     u32 draws() const { return draws_; }
