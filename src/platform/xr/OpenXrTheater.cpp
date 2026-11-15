@@ -56,6 +56,8 @@ struct OpenXrTheater::Impl {
     bool passthroughExt = false;
     bool colorSpaceExt = false;
     bool layerSettingsExt = false;
+    bool perfSettingsExt = false;
+    bool refreshRateExt = false;
 
     VkInstance vkInstance = VK_NULL_HANDLE;
     VkPhysicalDevice vkPhys = VK_NULL_HANDLE;
@@ -103,6 +105,45 @@ struct OpenXrTheater::Impl {
     PFN_xrCreatePassthroughLayerFB pfnCreatePassthroughLayer = nullptr;
     PFN_xrDestroyPassthroughLayerFB pfnDestroyPassthroughLayer = nullptr;
     PFN_xrPassthroughLayerResumeFB pfnPassthroughLayerResume = nullptr;
+    PFN_xrPerfSettingsSetPerformanceLevelEXT pfnPerfSettingsSetPerformanceLevel = nullptr;
+    PFN_xrEnumerateDisplayRefreshRatesFB pfnEnumerateDisplayRefreshRates = nullptr;
+    PFN_xrRequestDisplayRefreshRateFB pfnRequestDisplayRefreshRate = nullptr;
+
+    void ApplyPerfAndRefresh() {
+        if (session == XR_NULL_HANDLE) return;
+        if (perfSettingsExt && pfnPerfSettingsSetPerformanceLevel) {
+            const XrResult cpuR = pfnPerfSettingsSetPerformanceLevel(
+                session, XR_PERF_SETTINGS_DOMAIN_CPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+            const XrResult gpuR = pfnPerfSettingsSetPerformanceLevel(
+                session, XR_PERF_SETTINGS_DOMAIN_GPU_EXT, XR_PERF_SETTINGS_LEVEL_SUSTAINED_HIGH_EXT);
+            SDL_Log("OpenXR perf levels sustained-high (cpu=%d, gpu=%d)", static_cast<int>(cpuR),
+                    static_cast<int>(gpuR));
+        }
+        if (refreshRateExt && pfnEnumerateDisplayRefreshRates && pfnRequestDisplayRefreshRate) {
+            uint32_t n = 0;
+            if (XR_SUCCEEDED(pfnEnumerateDisplayRefreshRates(session, 0, &n, nullptr)) && n > 0) {
+                std::vector<float> rates(n);
+                if (XR_SUCCEEDED(pfnEnumerateDisplayRefreshRates(session, n, &n, rates.data()))) {
+                    rates.resize(n);
+                    float target = 0.0f;
+                    for (float r : rates) {
+                        if (r > 59.4f && r < 60.6f) {
+                            target = r;
+                            break;
+                        }
+                        if (r >= 59.0f && (target == 0.0f || r < target)) {
+                            target = r;
+                        }
+                    }
+                    if (target > 0.0f) {
+                        const XrResult rr = pfnRequestDisplayRefreshRate(session, target);
+                        SDL_Log("OpenXR refresh rate request %.1f Hz (res=%d)", static_cast<double>(target),
+                                static_cast<int>(rr));
+                    }
+                }
+            }
+        }
+    }
 
     // OpenXR frame timing
     XrFrameState frameState{XR_TYPE_FRAME_STATE};
@@ -133,6 +174,7 @@ struct OpenXrTheater::Impl {
     bool CreateActions(std::string& error);
     void InitPassthrough();
     void SyncActions();
+    void RefreshHaptics(bool stopZero);
     void DoRecenter(XrTime displayTime);
     void DestroySwapchains();
     void Destroy();
@@ -775,6 +817,10 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error, bool stereo)
     if (d.colorSpaceExt) reqExts.push_back(XR_FB_COLOR_SPACE_EXTENSION_NAME);
     d.layerSettingsExt = HasExt(exts, XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
     if (d.layerSettingsExt) reqExts.push_back(XR_FB_COMPOSITION_LAYER_SETTINGS_EXTENSION_NAME);
+    d.perfSettingsExt = HasExt(exts, XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    if (d.perfSettingsExt) reqExts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
+    d.refreshRateExt = HasExt(exts, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    if (d.refreshRateExt) reqExts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
 
     XrInstanceCreateInfoAndroidKHR icia{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     icia.applicationVM = vm;
@@ -853,6 +899,16 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error, bool stereo)
             pfnSetColorSpace(d.session, XR_COLOR_SPACE_REC709_FB);
         }
     }
+    if (d.perfSettingsExt) {
+        xrGetInstanceProcAddr(d.instance, "xrPerfSettingsSetPerformanceLevelEXT",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&d.pfnPerfSettingsSetPerformanceLevel));
+    }
+    if (d.refreshRateExt) {
+        xrGetInstanceProcAddr(d.instance, "xrEnumerateDisplayRefreshRatesFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&d.pfnEnumerateDisplayRefreshRates));
+        xrGetInstanceProcAddr(d.instance, "xrRequestDisplayRefreshRateFB",
+                              reinterpret_cast<PFN_xrVoidFunction*>(&d.pfnRequestDisplayRefreshRate));
+    }
     d.InitPassthrough();
     SDL_Log("OpenXR Theater Quad initialized (passthrough=%d, quad=%ux%u, stereo=%d, fmt=%lld, colorSpace=%d, "
             "layerSettings=%d)",
@@ -877,6 +933,7 @@ bool OpenXrTheater::PollEvents(bool& shouldQuit) {
                 if (XR_SUCCEEDED(xrBeginSession(d.session, &sbi))) {
                     d.sessionRunning = true;
                     d.recenterPending = true;
+                    d.ApplyPerfAndRefresh();
                 }
             } else if (d.state == XR_SESSION_STATE_STOPPING) {
                 if (d.sessionRunning) xrEndSession(d.session);
@@ -907,6 +964,7 @@ bool OpenXrTheater::BeginFrame() {
     d.frameActive = true;
 
     d.SyncActions();
+    if (d.motorLeft || d.motorRight) d.RefreshHaptics(false);
     if (d.recenterPending) d.DoRecenter(d.frameState.predictedDisplayTime);
     return true;
 }
@@ -1142,27 +1200,31 @@ bool OpenXrTheater::ConsumeStereoToggle() {
     return t;
 }
 
+void OpenXrTheater::Impl::RefreshHaptics(bool stopZero) {
+    if (!sessionRunning || state != XR_SESSION_STATE_FOCUSED || !haptic) return;
+    const u16 vals[2] = {motorLeft, motorRight};
+    for (int i = 0; i < 2; ++i) {
+        XrHapticActionInfo hai{XR_TYPE_HAPTIC_ACTION_INFO};
+        hai.action = haptic;
+        hai.subactionPath = handPaths[i];
+        if (vals[i] == 0) {
+            if (stopZero) xrStopHapticFeedback(session, &hai);
+        } else {
+            XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+            vib.duration = 100'000'000LL;  // 100ms, refreshed each frame while motor active
+            vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+            vib.amplitude = std::clamp(float(vals[i]) / 65535.0f, 0.0f, 1.0f);
+            xrApplyHapticFeedback(session, &hai, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+        }
+    }
+}
+
 void OpenXrTheater::SetHaptics(u16 left, u16 right) {
     Impl& d = *impl_;
-    if (!d.sessionRunning || d.state != XR_SESSION_STATE_FOCUSED) return;
     if (left == d.motorLeft && right == d.motorRight && left == 0 && right == 0) return;
     d.motorLeft = left;
     d.motorRight = right;
-    const u16 vals[2] = {left, right};
-    for (int i = 0; i < 2; ++i) {
-        XrHapticActionInfo hai{XR_TYPE_HAPTIC_ACTION_INFO};
-        hai.action = d.haptic;
-        hai.subactionPath = d.handPaths[i];
-        if (vals[i] == 0) {
-            xrStopHapticFeedback(d.session, &hai);
-        } else {
-            XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
-            vib.duration = 100'000'000LL;  // 100ms, refreshed while motor active
-            vib.frequency = XR_FREQUENCY_UNSPECIFIED;
-            vib.amplitude = std::clamp(float(vals[i]) / 65535.0f, 0.0f, 1.0f);
-            xrApplyHapticFeedback(d.session, &hai, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
-        }
-    }
+    d.RefreshHaptics(true);
 }
 
 void OpenXrTheater::Recenter() { impl_->recenterPending = true; }

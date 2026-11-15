@@ -15,7 +15,7 @@ No game data is included in this repository or release APK. You need your own or
 ## Meta Quest 3 Features
 
 - **Stereoscopic 3D Window:** Renders 3D gameplay with true left/right eye parallax (`clip.x += eye * strength * (clip.w - focus)`) via dual-eye command replay in `SdlGpuDevice` and side-by-side OpenXR `XrCompositionLayerQuad` layers.
-- **Crisp Native Quad + Passthrough:** `1600×900` per eye, `4×` MSAA, `16×` anisotropic filtering, OpenXR `QUALITY_SUPER_SAMPLING_BIT_FB` + sharpening, Rec.709 color space, and full passthrough backdrop.
+- **Crisp Native Quad + Passthrough:** `1280×720` per eye (`2560×720` SBS), `2×` MSAA, `4×` anisotropic filtering, OpenXR `QUALITY_SUPER_SAMPLING_BIT_FB` + sharpening, Rec.709 color space, and full passthrough backdrop.
 - **Flat 2D HUD & Menus:** HUD elements, text, FMVs, and screen-space overlays stay pinned flat at zero disparity on the window plane.
 - **Touch Plus Controls & Haptics:** Native OpenXR input bindings and rumble.
 
@@ -23,9 +23,9 @@ No game data is included in this repository or release APK. You need your own or
 
 ## Installing & Playing on Quest 3
 
-1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.0.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
+1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.1.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
    ```sh
-   adb install -r futurama-quest-v0.1.0.apk
+   adb install -r futurama-quest-v0.1.1.apk
    ```
 2. Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe` folder) onto the headset in one of these locations:
    - `/sdcard/Android/data/com.futuramarecomp.app/files/`

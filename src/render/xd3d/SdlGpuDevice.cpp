@@ -183,8 +183,17 @@ struct SdlGpuDevice::Impl {
 
     SDL_GPUTransferBuffer* texTransferBuf = nullptr;
     u32 texTransferCapacity = 0;
-    SDL_GPUTransferBuffer* downloadBuf = nullptr;
-    u32 downloadCapacity = 0;
+    struct DownloadSlot {
+        SDL_GPUTransferBuffer* buf = nullptr;
+        SDL_GPUFence* fence = nullptr;
+        u32 capacity = 0;
+        u32 width = 0;
+        u32 height = 0;
+        u32 eyeBytes = 0;
+        bool stereo = false;
+    };
+    DownloadSlot downloadSlots[2]{};
+    u32 downloadWriteSlot = 0;
     PresentCallback onPresent;
     StereoPresentCallback onPresentStereo;
     bool stereoEnabled = false;
@@ -928,10 +937,20 @@ void SdlGpuDevice::Impl::Flush() {
             }
 
             SDL_GPURenderPass* rp = SDL_BeginGPURenderPass(cmd, &ci, 1, useDepth ? &di : nullptr);
+            SDL_GPUGraphicsPipeline* boundPipeline = nullptr;
+            bool hasBoundViewport = false;
+            SDL_GPUViewport boundViewport{};
             for (const DrawItem& item : pass.items) {
                 if (!item.pipeline) continue;
-                SDL_BindGPUGraphicsPipeline(rp, item.pipeline);
-                SDL_SetGPUViewport(rp, &item.viewport);
+                if (item.pipeline != boundPipeline) {
+                    SDL_BindGPUGraphicsPipeline(rp, item.pipeline);
+                    boundPipeline = item.pipeline;
+                }
+                if (!hasBoundViewport || std::memcmp(&item.viewport, &boundViewport, sizeof boundViewport) != 0) {
+                    SDL_SetGPUViewport(rp, &item.viewport);
+                    boundViewport = item.viewport;
+                    hasBoundViewport = true;
+                }
                 if (item.isClearQuad) {
                     SDL_SetGPUStencilReference(rp, item.stencilRef);
                     SDL_PushGPUVertexUniformData(cmd, 0, &item.clearCB, sizeof item.clearCB);
@@ -996,7 +1015,11 @@ void SdlGpuDevice::Impl::Destroy() {
     if (ib) SDL_ReleaseGPUBuffer(gpu, ib);
     if (transferBuf) SDL_ReleaseGPUTransferBuffer(gpu, transferBuf);
     if (texTransferBuf) SDL_ReleaseGPUTransferBuffer(gpu, texTransferBuf);
-    if (downloadBuf) SDL_ReleaseGPUTransferBuffer(gpu, downloadBuf);
+    for (DownloadSlot& slot : downloadSlots) {
+        if (slot.fence) SDL_ReleaseGPUFence(gpu, slot.fence);
+        if (slot.buf) SDL_ReleaseGPUTransferBuffer(gpu, slot.buf);
+        slot = {};
+    }
     if (vs) SDL_ReleaseGPUShader(gpu, vs);
     if (ps) SDL_ReleaseGPUShader(gpu, ps);
     if (clearVs) SDL_ReleaseGPUShader(gpu, clearVs);
@@ -1183,17 +1206,26 @@ void SdlGpuDevice::Swap(u32 flags) {
     if ((wantStereoPresent || d.onPresent) && bb->physicalWidth && bb->physicalHeight) {
         const u32 eyeBytes = bb->physicalWidth * bb->physicalHeight * 4;
         const u32 totalBytes = wantStereoPresent ? eyeBytes * 2 : eyeBytes;
-        if (!d.downloadBuf || d.downloadCapacity < totalBytes) {
-            if (d.downloadBuf) SDL_ReleaseGPUTransferBuffer(d.gpu, d.downloadBuf);
+        const u32 curIdx = d.downloadWriteSlot & 1u;
+        const u32 prevIdx = curIdx ^ 1u;
+        Impl::DownloadSlot& cur = d.downloadSlots[curIdx];
+        Impl::DownloadSlot& prev = d.downloadSlots[prevIdx];
+
+        if (cur.fence) {
+            SDL_WaitForGPUFences(d.gpu, true, &cur.fence, 1);
+            SDL_ReleaseGPUFence(d.gpu, cur.fence);
+            cur.fence = nullptr;
+        }
+        if (!cur.buf || cur.capacity < totalBytes) {
+            if (cur.buf) SDL_ReleaseGPUTransferBuffer(d.gpu, cur.buf);
             SDL_GPUTransferBufferCreateInfo tbi = {};
             tbi.usage = SDL_GPU_TRANSFERBUFFERUSAGE_DOWNLOAD;
             tbi.size = totalBytes;
-            d.downloadBuf = SDL_CreateGPUTransferBuffer(d.gpu, &tbi);
-            d.downloadCapacity = d.downloadBuf ? totalBytes : 0;
+            cur.buf = SDL_CreateGPUTransferBuffer(d.gpu, &tbi);
+            cur.capacity = cur.buf ? totalBytes : 0;
         }
-        if (d.downloadBuf) {
-            SDL_GPUCommandBuffer* dlCmd = SDL_AcquireGPUCommandBuffer(d.gpu);
-            if (dlCmd) {
+        if (cur.buf) {
+            if (SDL_GPUCommandBuffer* dlCmd = SDL_AcquireGPUCommandBuffer(d.gpu)) {
                 SDL_GPUCopyPass* cp = SDL_BeginGPUCopyPass(dlCmd);
                 SDL_GPUTextureRegion src = {};
                 src.texture = bb->tex;
@@ -1201,7 +1233,7 @@ void SdlGpuDevice::Swap(u32 flags) {
                 src.h = bb->physicalHeight;
                 src.d = 1;
                 SDL_GPUTextureTransferInfo dst = {};
-                dst.transfer_buffer = d.downloadBuf;
+                dst.transfer_buffer = cur.buf;
                 SDL_DownloadFromGPUTexture(cp, &src, &dst);
                 if (wantStereoPresent) {
                     src.texture = bb->rightTex;
@@ -1209,21 +1241,31 @@ void SdlGpuDevice::Swap(u32 flags) {
                     SDL_DownloadFromGPUTexture(cp, &src, &dst);
                 }
                 SDL_EndGPUCopyPass(cp);
-                if (SDL_GPUFence* fence = SDL_SubmitGPUCommandBufferAndAcquireFence(dlCmd)) {
-                    SDL_WaitForGPUFences(d.gpu, true, &fence, 1);
-                    SDL_ReleaseGPUFence(d.gpu, fence);
-                    if (void* px = SDL_MapGPUTransferBuffer(d.gpu, d.downloadBuf, false)) {
-                        if (wantStereoPresent) {
-                            d.onPresentStereo(px, static_cast<const u8*>(px) + eyeBytes, bb->physicalWidth,
-                                              bb->physicalHeight);
-                        } else if (d.onPresent) {
-                            d.onPresent(px, bb->physicalWidth, bb->physicalHeight);
-                        }
-                        SDL_UnmapGPUTransferBuffer(d.gpu, d.downloadBuf);
-                    }
-                }
+                cur.fence = SDL_SubmitGPUCommandBufferAndAcquireFence(dlCmd);
+                cur.width = bb->physicalWidth;
+                cur.height = bb->physicalHeight;
+                cur.eyeBytes = eyeBytes;
+                cur.stereo = wantStereoPresent;
             }
         }
+
+        // Present the previous slot (pipelined 1 frame ahead so GPU rendering overlaps CPU work);
+        // on the very first frame, fall back to presenting the current slot right away.
+        Impl::DownloadSlot& show = prev.fence ? prev : cur;
+        if (show.fence && show.buf) {
+            SDL_WaitForGPUFences(d.gpu, true, &show.fence, 1);
+            SDL_ReleaseGPUFence(d.gpu, show.fence);
+            show.fence = nullptr;
+            if (void* px = SDL_MapGPUTransferBuffer(d.gpu, show.buf, false)) {
+                if (show.stereo && d.onPresentStereo) {
+                    d.onPresentStereo(px, static_cast<const u8*>(px) + show.eyeBytes, show.width, show.height);
+                } else if (d.onPresent) {
+                    d.onPresent(px, show.width, show.height);
+                }
+                SDL_UnmapGPUTransferBuffer(d.gpu, show.buf);
+            }
+        }
+        d.downloadWriteSlot = prevIdx;
     }
 
     if (!d.window) return;

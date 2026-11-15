@@ -79,6 +79,7 @@ bool SetVibration(App& app, bool on) {                // orig: 0x000A18B0 (byte 
         app.options.vibration = on;
         app.options.dirty = true;
     }
+    app.input.vibrationOption = on;
     return true;
 }
 
@@ -135,6 +136,7 @@ bool RestoreDefaults(App& app) {                      // orig: 0x000A1B70
     o.appliedX = o.screenX, o.appliedY = o.screenY;
     SetOffset(app, o.screenX, o.screenY);
     o.b1 = false, o.subtitles = false, o.vibration = true, o.invert = false;
+    app.input.vibrationOption = o.vibration;
     app.levelTargets.Reset();
     return true;                                      // (the dirty flag untouched)
 }
@@ -177,6 +179,7 @@ bool DeserializeOptions(App& app, const u8* d) {      // orig: 0x000A2070
     o.subtitles = d[0x15] != 0;
     o.vibration = d[0x16] != 0;
     o.invert = d[0x17] != 0;
+    app.input.vibrationOption = o.vibration;
     std::memcpy(app.levelTargets.raw.data(), d + 0x18, kOptionsRecordsSize);
     o.dirty = false;
     app.Sound().SetCategoryVolume(0, o.sfx);          // sound system vf28

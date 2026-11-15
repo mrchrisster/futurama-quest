@@ -67,7 +67,9 @@
 #include <SDL3/SDL_timer.h>
 #endif
 #ifdef __ANDROID__
+#include <SDL3/SDL_log.h>
 #include <SDL3/SDL_main.h>
+#include <SDL3/SDL_system.h>
 #endif
 
 
@@ -76,6 +78,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <filesystem>
+#include <fstream>
 #include <memory>
 #include <string>
 #include <vector>
@@ -85,6 +88,53 @@ using namespace fut;
 namespace {
 
 std::filesystem::path SaveFolder() { return platform::PrefFolder() / "saves"; }   // (%APPDATA%\FuturamaRecomp\saves)
+
+// Mirror internal saves out to app-external storage so users / adb pull can back up progress on non-debuggable APKs
+// without moving the live SaveFolder() path.
+void MirrorSavesToExternal(const std::filesystem::path& saveDir, const char* phase) {
+#ifdef __ANDROID__
+    std::error_code ec;
+    if (!std::filesystem::exists(saveDir, ec) || !std::filesystem::is_directory(saveDir, ec)) return;
+    const char* ext = SDL_GetAndroidExternalStoragePath();
+    if (!ext || !*ext) return;
+    const std::filesystem::path dst = std::filesystem::path(ext) / "saves_backup";
+    // Recreate directories/files instead of std::filesystem::copy so internal 0700/0600 modes are not cloned onto
+    // external storage (which blocks adb pull via ext_data_rw).
+    std::filesystem::remove_all(dst, ec);
+    ec.clear();
+    std::filesystem::create_directories(dst, ec);
+    if (ec) {
+        SDL_Log("Save backup (%s): failed to create %s: %s", phase, dst.c_str(), ec.message().c_str());
+        return;
+    }
+    int filesCopied = 0;
+    for (const auto& entry : std::filesystem::recursive_directory_iterator(saveDir, ec)) {
+        if (ec) break;
+        const std::filesystem::path rel = std::filesystem::relative(entry.path(), saveDir, ec);
+        if (ec || rel.empty()) {
+            ec.clear();
+            continue;
+        }
+        const std::filesystem::path outPath = dst / rel;
+        if (entry.is_directory(ec)) {
+            std::filesystem::create_directories(outPath, ec);
+        } else if (entry.is_regular_file(ec)) {
+            std::filesystem::create_directories(outPath.parent_path(), ec);
+            std::ifstream in(entry.path(), std::ios::binary);
+            std::ofstream out(outPath, std::ios::binary | std::ios::trunc);
+            if (in && out) {
+                out << in.rdbuf();
+                if (out.good()) ++filesCopied;
+            }
+        }
+        ec.clear();
+    }
+    SDL_Log("Save backup (%s): mirrored %d file(s) from %s -> %s", phase, filesCopied, saveDir.c_str(), dst.c_str());
+#else
+    (void)saveDir;
+    (void)phase;
+#endif
+}
 
 // The launcher's test of a disc it found (main's own checks below, without loading the image): opens, has a
 // default.xbe, and that is the NTSC-U or the PAL build.
@@ -127,12 +177,12 @@ int main(int argc, char** argv) {
     using GpuDevice = render::xd3d::D3D11Device;
 #endif
 #ifdef FUT_USE_OPENXR
-    u32 width = 1600, height = 900;                   // per-eye OpenXR 3D theater quad texture size (3200x900 SBS)
+    u32 width = 1280, height = 720;                   // per-eye OpenXR 3D theater quad texture size (2560x720 SBS)
     bool fullscreen = false;
     GpuDevice::Filter filter = GpuDevice::Filter::Linear;   // (--filter)
     double renderScale = 0;                           // (--render-scale: 0 = auto)
     double aspect = 16.0 / 9.0;                       // 16:9 widescreen quad
-    u32 aaSamples = 4, anisotropy = 16;               // crisp 4x MSAA + 16x AF on Quest 3 quad
+    u32 aaSamples = 2, anisotropy = 4;                // balanced 2x MSAA + 4x AF for smooth 60 fps on Quest 3
     bool stereo = true;                               // stereoscopic 3D window by default (--2d disables)
     f32 stereoStrength = 0.022f;                      // clip-space shift at infinity (~5.6 cm on 2.56 m quad)
     f32 stereoFocus = 12.0f;                          // convergence depth in game units (just in front of Fry)
@@ -251,6 +301,7 @@ int main(int argc, char** argv) {
     render::nixbox::NiXBoxRenderer renderer(device);  // the factory 0x0014C200 (App+0x104)
     platform::Gamepads gamepads;
     input::GamepadState pad0{};
+    MirrorSavesToExternal(saveDir, "startup");
     game::app::HostSaveStorage saves(saveDir);        // (one directory per save game, as the U:\ model)
     saves.readDisc = [&](const std::string& path, std::vector<u8>& out) { return vfs.ReadFile(path, out); };
     // orig: App::Init's XboxSoundSystem 0x000CCD90 (DirectSoundCreate, the effects image): the backend first, its
@@ -266,6 +317,7 @@ int main(int argc, char** argv) {
     if (soundOffline) soundBackend.InitOffline();
     std::vector<s32> soundDrop;
     auto finish = [&](int rc) {
+        MirrorSavesToExternal(saveDir, "shutdown");
 #ifdef FUT_USE_OPENXR
         device.SetStereoPresentCallback(nullptr);
         device.SetPresentCallback(nullptr);
