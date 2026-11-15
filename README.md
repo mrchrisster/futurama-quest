@@ -23,9 +23,9 @@ No game data is included in this repository or release APK. You need your own or
 
 ## Installing & Playing on Quest 3
 
-1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.1.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
+1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.2.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
    ```sh
-   adb install -r futurama-quest-v0.1.1.apk
+   adb install -r futurama-quest-v0.1.2.apk
    ```
 2. Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe` folder) onto the headset in one of these locations:
    - `/sdcard/Android/data/com.futuramarecomp.app/files/`

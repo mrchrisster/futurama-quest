@@ -58,6 +58,8 @@ struct OpenXrTheater::Impl {
     bool layerSettingsExt = false;
     bool perfSettingsExt = false;
     bool refreshRateExt = false;
+    bool touchPlusExt = false;
+    bool touchProExt = false;
 
     VkInstance vkInstance = VK_NULL_HANDLE;
     VkPhysicalDevice vkPhys = VK_NULL_HANDLE;
@@ -166,6 +168,9 @@ struct OpenXrTheater::Impl {
 
     input::GamepadState gamepad{};
     u16 motorLeft = 0, motorRight = 0;
+    u16 lastHapticVal[2] = {0, 0};
+    u64 lastHapticApplyMs[2] = {0, 0};
+    bool profileLogged = false;
 
     bool CreateVulkan(std::string& error);
     bool CreateSwapchains(u32 w, u32 h, std::string& error);
@@ -174,7 +179,8 @@ struct OpenXrTheater::Impl {
     bool CreateActions(std::string& error);
     void InitPassthrough();
     void SyncActions();
-    void RefreshHaptics(bool stopZero);
+    void RefreshHaptics(bool forceImmediate);
+    void LogActiveProfiles();
     void DoRecenter(XrTime displayTime);
     void DestroySwapchains();
     void Destroy();
@@ -524,7 +530,6 @@ bool OpenXrTheater::Impl::CreateActions(std::string& error) {
         return p;
     };
 
-    XrPath touchProfile = path("/interaction_profiles/oculus/touch_controller");
     std::vector<XrActionSuggestedBinding> bindings = {
         {leftStick, path("/user/hand/left/input/thumbstick")},
         {rightStick, path("/user/hand/right/input/thumbstick")},
@@ -542,16 +547,26 @@ bool OpenXrTheater::Impl::CreateActions(std::string& error) {
         {haptic, path("/user/hand/left/output/haptic")},
         {haptic, path("/user/hand/right/output/haptic")},
     };
-
-    XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
-    sb.interactionProfile = touchProfile;
-    sb.suggestedBindings = bindings.data();
-    sb.countSuggestedBindings = static_cast<u32>(bindings.size());
-    r = xrSuggestInteractionProfileBindings(instance, &sb);
-    if (XR_FAILED(r)) {
-        error = XrErr("xrSuggestInteractionProfileBindings", r);
-        return false;
-    }
+    auto suggestProfile = [&](const char* profileName, bool required) {
+        XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
+        sb.interactionProfile = path(profileName);
+        sb.suggestedBindings = bindings.data();
+        sb.countSuggestedBindings = static_cast<u32>(bindings.size());
+        const XrResult res = xrSuggestInteractionProfileBindings(instance, &sb);
+        if (XR_FAILED(res)) {
+            if (required) {
+                error = XrErr("xrSuggestInteractionProfileBindings", res);
+                return false;
+            }
+            SDL_Log("OpenXR optional profile %s rejected (%d)", profileName, static_cast<int>(res));
+        } else {
+            SDL_Log("OpenXR bound profile %s", profileName);
+        }
+        return true;
+    };
+    if (!suggestProfile("/interaction_profiles/oculus/touch_controller", true)) return false;
+    if (touchPlusExt) (void)suggestProfile("/interaction_profiles/meta/touch_controller_plus", false);
+    if (touchProExt) (void)suggestProfile("/interaction_profiles/facebook/touch_controller_pro", false);
 
     XrSessionActionSetsAttachInfo ai{XR_TYPE_SESSION_ACTION_SETS_ATTACH_INFO};
     ai.countActionSets = 1;
@@ -616,6 +631,7 @@ void OpenXrTheater::Impl::DoRecenter(XrTime displayTime) {
 void OpenXrTheater::Impl::SyncActions() {
     gamepad = {};
     if (state != XR_SESSION_STATE_FOCUSED) return;
+    if (!profileLogged) LogActiveProfiles();
 
     XrActiveActionSet aas{actionSet, XR_NULL_PATH};
     XrActionsSyncInfo asi{XR_TYPE_ACTIONS_SYNC_INFO};
@@ -821,6 +837,10 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error, bool stereo)
     if (d.perfSettingsExt) reqExts.push_back(XR_EXT_PERFORMANCE_SETTINGS_EXTENSION_NAME);
     d.refreshRateExt = HasExt(exts, XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
     if (d.refreshRateExt) reqExts.push_back(XR_FB_DISPLAY_REFRESH_RATE_EXTENSION_NAME);
+    d.touchPlusExt = HasExt(exts, "XR_META_touch_controller_plus");
+    if (d.touchPlusExt) reqExts.push_back("XR_META_touch_controller_plus");
+    d.touchProExt = HasExt(exts, "XR_FB_touch_controller_pro");
+    if (d.touchProExt) reqExts.push_back("XR_FB_touch_controller_pro");
 
     XrInstanceCreateInfoAndroidKHR icia{XR_TYPE_INSTANCE_CREATE_INFO_ANDROID_KHR};
     icia.applicationVM = vm;
@@ -942,6 +962,8 @@ bool OpenXrTheater::PollEvents(bool& shouldQuit) {
                 d.sessionRunning = false;
                 shouldQuit = true;
             }
+        } else if (ev.type == XR_TYPE_EVENT_DATA_INTERACTION_PROFILE_CHANGED) {
+            d.LogActiveProfiles();
         }
         ev = {XR_TYPE_EVENT_DATA_BUFFER};
     }
@@ -1200,28 +1222,60 @@ bool OpenXrTheater::ConsumeStereoToggle() {
     return t;
 }
 
-void OpenXrTheater::Impl::RefreshHaptics(bool stopZero) {
+void OpenXrTheater::Impl::LogActiveProfiles() {
+    profileLogged = true;
+    for (int i = 0; i < 2; ++i) {
+        XrInteractionProfileState ips{XR_TYPE_INTERACTION_PROFILE_STATE};
+        const XrResult r = xrGetCurrentInteractionProfile(session, handPaths[i], &ips);
+        char buf[XR_MAX_PATH_LENGTH] = "<none>";
+        if (XR_SUCCEEDED(r) && ips.interactionProfile != XR_NULL_PATH) {
+            uint32_t len = 0;
+            xrPathToString(instance, ips.interactionProfile, sizeof(buf), &len, buf);
+        }
+        SDL_Log("OpenXR hand[%d] active profile: %s (res=%d, touchPlusExt=%d, touchProExt=%d)", i, buf,
+                static_cast<int>(r), static_cast<int>(touchPlusExt), static_cast<int>(touchProExt));
+    }
+}
+
+void OpenXrTheater::Impl::RefreshHaptics(bool forceImmediate) {
     if (!sessionRunning || state != XR_SESSION_STATE_FOCUSED || !haptic) return;
+    const u64 nowMs = SDL_GetTicks();
     const u16 vals[2] = {motorLeft, motorRight};
     for (int i = 0; i < 2; ++i) {
         XrHapticActionInfo hai{XR_TYPE_HAPTIC_ACTION_INFO};
         hai.action = haptic;
         hai.subactionPath = handPaths[i];
         if (vals[i] == 0) {
-            if (stopZero) xrStopHapticFeedback(session, &hai);
-        } else {
-            XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
-            vib.duration = 100'000'000LL;  // 100ms, refreshed each frame while motor active
-            vib.frequency = XR_FREQUENCY_UNSPECIFIED;
-            vib.amplitude = std::clamp(float(vals[i]) / 65535.0f, 0.0f, 1.0f);
-            xrApplyHapticFeedback(session, &hai, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+            if (lastHapticVal[i] != 0 || forceImmediate) {
+                const XrResult r = xrStopHapticFeedback(session, &hai);
+                if (XR_FAILED(r)) {
+                    SDL_Log("OpenXR xrStopHapticFeedback hand[%d] failed: %d", i, static_cast<int>(r));
+                }
+            }
+            lastHapticVal[i] = 0;
+            lastHapticApplyMs[i] = 0;
+            continue;
         }
+        const int diff = std::abs(static_cast<int>(vals[i]) - static_cast<int>(lastHapticVal[i]));
+        const bool due = (nowMs - lastHapticApplyMs[i]) >= 65;
+        if (lastHapticVal[i] != 0 && !due && (!forceImmediate || diff < 6554)) continue;
+
+        XrHapticVibration vib{XR_TYPE_HAPTIC_VIBRATION};
+        vib.duration = 100'000'000LL;  // 100ms, refreshed every ~65ms while motor active
+        vib.frequency = XR_FREQUENCY_UNSPECIFIED;
+        vib.amplitude = std::clamp(float(vals[i]) / 65535.0f, 0.0f, 1.0f);
+        const XrResult r = xrApplyHapticFeedback(session, &hai, reinterpret_cast<const XrHapticBaseHeader*>(&vib));
+        if (XR_FAILED(r)) {
+            SDL_Log("OpenXR xrApplyHapticFeedback hand[%d] failed: %d", i, static_cast<int>(r));
+        }
+        lastHapticVal[i] = vals[i];
+        lastHapticApplyMs[i] = nowMs;
     }
 }
 
 void OpenXrTheater::SetHaptics(u16 left, u16 right) {
     Impl& d = *impl_;
-    if (left == d.motorLeft && right == d.motorRight && left == 0 && right == 0) return;
+    if (left == d.motorLeft && right == d.motorRight) return;
     d.motorLeft = left;
     d.motorRight = right;
     d.RefreshHaptics(true);
