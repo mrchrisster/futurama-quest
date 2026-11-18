@@ -23,15 +23,19 @@ No game data is included in this repository or release APK. You need your own or
 
 ## Installing & Playing on Quest 3
 
-1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.4.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
+1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.5.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
    ```sh
-   adb install -r futurama-quest-v0.1.4.apk
+   adb install -r futurama-quest-v0.1.5.apk
    ```
-2. Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe` folder) onto the headset in one of these locations:
-   - `/sdcard/Android/data/com.futuramarecomp.app/files/`
-   - `/sdcard/Futurama/`
-   - `/sdcard/Download/`
-3. Launch **Futurama** from **Unknown Sources** in your Quest library.
+2. Copy your Xbox Futurama disc image (`.iso`, NTSC-U or PAL) onto the headset, for example into `Download`.
+3. Launch **Futurama** from **Unknown Sources** in your Quest library. On the first start a file picker opens: pick
+   your `.iso` (in the picker's Recent list or under Download). The game remembers it, so this happens only once.
+
+   The app has no storage permission, so it can only read the disc through that picker. Alternatively, put the `.iso`
+   straight into the app's own folder with adb or SideQuest, and no picker is needed:
+   ```sh
+   adb push "Futurama (USA).iso" /sdcard/Android/data/com.futuramarecomp.app/files/
+   ```
 
 ### Quest Touch Plus Controls
 

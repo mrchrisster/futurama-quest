@@ -1,6 +1,11 @@
 // XDVDFS reader; see Xdvdfs.h.
 #include "core/fs/Xdvdfs.h"
 
+#include <cstdlib>
+#ifndef _WIN32
+#include <unistd.h>
+#endif
+
 #include <algorithm>
 #include <cstring>
 
@@ -36,7 +41,18 @@ std::string Xdvdfs::Normalize(const std::string& path) {
 bool Xdvdfs::Open(const std::string& imagePath, std::string& error) {
     entries_.clear();
     std::FILE* raw = nullptr;
-    if (fopen_s(&raw, imagePath.c_str(), "rb") != 0 || !raw) {
+#ifndef _WIN32
+    // (port, Android) "fd:<n>": a file descriptor the system file picker handed us for a content:// document
+    // (platform/sdl/Launcher.cpp); each Open gets its own duplicate, so the original stays open.
+    if (imagePath.rfind("fd:", 0) == 0) {
+        const int fd = std::atoi(imagePath.c_str() + 3);
+        const int dupFd = fd >= 0 ? ::dup(fd) : -1;
+        if (dupFd >= 0 && !(raw = ::fdopen(dupFd, "rb"))) ::close(dupFd);
+        if (raw) std::rewind(raw);
+    } else
+#endif
+    if (fopen_s(&raw, imagePath.c_str(), "rb") != 0 || !raw) raw = nullptr;
+    if (!raw) {
         error = "cannot open " + imagePath;
         return false;
     }

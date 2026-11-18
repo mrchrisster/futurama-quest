@@ -14,6 +14,9 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fstream>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
 #include <mutex>
 #include <vector>
 
@@ -27,6 +30,93 @@ std::string Utf8(const sfs::path& p) {
 }
 
 sfs::path PathOf(const std::string& utf8) { return sfs::path(std::u8string(utf8.begin(), utf8.end())); }
+
+#ifdef __ANDROID__
+// A content:// document (the system file picker's answer, or one remembered from it) as "fd:<n>" for Xdvdfs: the
+// app has no storage permission, so a picked .iso in Download etc. can only be read through the ContentResolver.
+// persist: keep the read grant across launches (the picker's OPEN_DOCUMENT grants are persistable).
+std::string OpenContentUri(const std::string& uri, bool persist) {
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    jobject act = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (!env || !act) return {};
+    std::string out;
+    auto clear = [&] {
+        if (env->ExceptionCheck()) {
+            env->ExceptionDescribe();
+            env->ExceptionClear();
+            return true;
+        }
+        return false;
+    };
+    jclass actCls = env->GetObjectClass(act);
+    jobject cr = env->CallObjectMethod(act, env->GetMethodID(actCls, "getContentResolver",
+                                                             "()Landroid/content/ContentResolver;"));
+    jclass uriCls = env->FindClass("android/net/Uri");
+    jstring juri = env->NewStringUTF(uri.c_str());
+    jobject u = env->CallStaticObjectMethod(uriCls, env->GetStaticMethodID(uriCls, "parse",
+                                                                           "(Ljava/lang/String;)Landroid/net/Uri;"),
+                                            juri);
+    if (!clear() && cr && u) {
+        jclass crCls = env->GetObjectClass(cr);
+        if (persist) {
+            env->CallVoidMethod(cr, env->GetMethodID(crCls, "takePersistableUriPermission", "(Landroid/net/Uri;I)V"),
+                                u, jint(1) /* FLAG_GRANT_READ_URI_PERMISSION */);
+            if (clear()) std::fprintf(stderr, "launcher: no persistable grant for %s\n", uri.c_str());
+        }
+        jstring mode = env->NewStringUTF("r");
+        jobject pfd = env->CallObjectMethod(cr, env->GetMethodID(crCls, "openFileDescriptor",
+                                                                 "(Landroid/net/Uri;Ljava/lang/String;)"
+                                                                 "Landroid/os/ParcelFileDescriptor;"),
+                                            u, mode);
+        if (!clear() && pfd) {
+            jclass pfdCls = env->GetObjectClass(pfd);
+            const jint fd = env->CallIntMethod(pfd, env->GetMethodID(pfdCls, "detachFd", "()I"));
+            if (!clear() && fd >= 0) out = "fd:" + std::to_string(fd);
+            env->DeleteLocalRef(pfdCls);
+            env->DeleteLocalRef(pfd);
+        }
+        env->DeleteLocalRef(mode);
+        env->DeleteLocalRef(crCls);
+    }
+    if (u) env->DeleteLocalRef(u);
+    env->DeleteLocalRef(juri);
+    env->DeleteLocalRef(uriCls);
+    if (cr) env->DeleteLocalRef(cr);
+    env->DeleteLocalRef(actCls);
+    env->DeleteLocalRef(act);
+    return out;
+}
+bool IsContentUri(const std::string& s) { return s.rfind("content://", 0) == 0; }
+
+// The launch intent's data URI, when the game was opened on a file ("Open with" from a file manager, or
+// am start -d <uri> --grant-read-uri-permission). Empty otherwise.
+std::string LaunchIntentUri() {
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    jobject act = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (!env || !act) return {};
+    std::string out;
+    jclass actCls = env->GetObjectClass(act);
+    jobject intent = env->CallObjectMethod(act, env->GetMethodID(actCls, "getIntent", "()Landroid/content/Intent;"));
+    if (!env->ExceptionCheck() && intent) {
+        jclass intentCls = env->GetObjectClass(intent);
+        jstring ds = static_cast<jstring>(
+            env->CallObjectMethod(intent, env->GetMethodID(intentCls, "getDataString", "()Ljava/lang/String;")));
+        if (!env->ExceptionCheck() && ds) {
+            if (const char* c = env->GetStringUTFChars(ds, nullptr)) {
+                out = c;
+                env->ReleaseStringUTFChars(ds, c);
+            }
+            env->DeleteLocalRef(ds);
+        }
+        env->DeleteLocalRef(intentCls);
+        env->DeleteLocalRef(intent);
+    }
+    if (env->ExceptionCheck()) env->ExceptionClear();
+    env->DeleteLocalRef(actCls);
+    env->DeleteLocalRef(act);
+    return out;
+}
+#endif
 
 // The path as the narrow string Vfs::Open takes (the C library's narrow file names: on Windows the ANSI code page,
 // as a command-line argument; a path with characters outside it goes by its short name; "" when neither works).
@@ -188,12 +278,38 @@ std::string FindDisc(const std::function<bool(const std::string& source, std::st
             error = "the path has characters that cannot be opened here (try a folder with a plain name)";
             return false;
         }
+#ifdef __ANDROID__
+        if (IsContentUri(source)) {                   // (picked with the system file picker)
+            const std::string fdPath = OpenContentUri(source, true);
+            if (fdPath.empty()) {
+                error = "the picked file can't be opened (pick it again)";
+                return false;
+            }
+            source = fdPath;
+        }
+#endif
         return check(source, error);
     };
     std::string source;
     const sfs::path settings = SettingsFile();
     std::error_code ec;
-    if (const sfs::path p = Remembered(settings); !p.empty() && sfs::exists(p, ec) && test(p, source)) return source;
+#ifdef __ANDROID__
+    if (const std::string uri = LaunchIntentUri(); IsContentUri(uri)) {   // (opened on a file)
+        if (test(PathOf(uri), source)) {
+            Remember(settings, PathOf(uri));
+            return source;
+        }
+        ErrorBox("The file the game was opened with can't be used:\n\n" + error);
+    }
+#endif
+    if (const sfs::path p = Remembered(settings); !p.empty() &&
+#ifdef __ANDROID__
+                                                   (IsContentUri(Utf8(p)) || sfs::exists(p, ec)) &&
+#else
+                                                   sfs::exists(p, ec) &&
+#endif
+                                                   test(p, source))
+        return source;
     const sfs::path dir = ExeFolder();
     for (const sfs::path& p : NextToExe(dir)) {
         if (test(p, source)) return source;
@@ -234,7 +350,8 @@ std::string FindDisc(const std::function<bool(const std::string& source, std::st
             Remember(settings, p);
             return source;
         }
-        ErrorBox("No Futurama (Xbox) disc image (.iso) found.\n\nCopy your Futurama .iso to:\n" +
+        ErrorBox("No Futurama (Xbox) disc image (.iso) picked.\n\nStart the game again and pick your Futurama .iso "
+                 "(for example from Download), or copy it to:\n" +
                  (extHint.empty() ? std::string("/sdcard/Android/data/com.futuramarecomp.app/files/") : extHint) +
                  (error.empty() ? std::string() : ("\n\nLast error: " + error)));
         return {};
