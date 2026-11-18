@@ -23,9 +23,9 @@ No game data is included in this repository or release APK. You need your own or
 
 ## Installing & Playing on Quest 3
 
-1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.2.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
+1. Download the latest APK from [Releases](../../releases) (`futurama-quest-v0.1.3.apk`) and sideload it via SideQuest, Meta Quest Developer Hub, or `adb`:
    ```sh
-   adb install -r futurama-quest-v0.1.2.apk
+   adb install -r futurama-quest-v0.1.3.apk
    ```
 2. Copy your Xbox `futurama.iso` (any `*futurama*.iso`, or extracted `default.xbe` folder) onto the headset in one of these locations:
    - `/sdcard/Android/data/com.futuramarecomp.app/files/`
@@ -46,6 +46,13 @@ No game data is included in this repository or release APK. You need your own or
 | `LB + RB + Menu` | Back |
 | **`LB + RB + L3`** | **Toggle Stereoscopic 3D / Flat 2D live** |
 | **`L3 + R3`** | **Recenter theater window** |
+| **Hold `LB + RB` (both grips)** | **Window mode: move the screen with your hands, pull hands apart / together for distance** |
+| `LB + RB` + Left Stick Up/Down | Screen distance |
+| `LB + RB` + Right Stick Up/Down | Screen size |
+| `LB + RB + R3` | Toggle dark background / mixed reality (passthrough) |
+| `LB + RB + Y` | Reset screen size and distance |
+
+Screen distance, size, height and the background choice are remembered between launches (`files/xr_view.txt`). While both grips are held the game gets no input except `Menu` (= Back).
 
 ---
 

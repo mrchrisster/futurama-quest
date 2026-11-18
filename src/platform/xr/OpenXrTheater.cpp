@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <vector>
 
@@ -43,6 +44,53 @@ u32 FindMemoryType(VkPhysicalDevice phys, u32 typeBits, VkMemoryPropertyFlags pr
     }
     return UINT32_MAX;
 }
+
+// Small vector/quaternion helpers for the screen grab (local space, metres).
+XrVector3f V3(float x, float y, float z) { return {x, y, z}; }
+XrVector3f Add(const XrVector3f& a, const XrVector3f& b) { return {a.x + b.x, a.y + b.y, a.z + b.z}; }
+XrVector3f Sub(const XrVector3f& a, const XrVector3f& b) { return {a.x - b.x, a.y - b.y, a.z - b.z}; }
+XrVector3f Mul(const XrVector3f& a, float s) { return {a.x * s, a.y * s, a.z * s}; }
+float Dot(const XrVector3f& a, const XrVector3f& b) { return a.x * b.x + a.y * b.y + a.z * b.z; }
+XrVector3f Cross(const XrVector3f& a, const XrVector3f& b) {
+    return {a.y * b.z - a.z * b.y, a.z * b.x - a.x * b.z, a.x * b.y - a.y * b.x};
+}
+float Len(const XrVector3f& a) { return std::sqrt(Dot(a, a)); }
+XrVector3f Norm(const XrVector3f& a, const XrVector3f& fallback) {
+    const float l = Len(a);
+    return l > 1e-5f ? Mul(a, 1.0f / l) : fallback;
+}
+XrVector3f Rotate(const XrQuaternionf& q, const XrVector3f& v) {
+    const XrVector3f u{q.x, q.y, q.z};
+    const XrVector3f t = Mul(Cross(u, v), 2.0f);
+    return Add(Add(v, Mul(t, q.w)), Cross(u, t));
+}
+XrQuaternionf QuatFromTo(const XrVector3f& a, const XrVector3f& b) {   // unit vectors
+    const float d = std::clamp(Dot(a, b), -1.0f, 1.0f);
+    if (d > 0.99999f) return {0.0f, 0.0f, 0.0f, 1.0f};
+    XrVector3f axis = Cross(a, b);
+    if (Len(axis) < 1e-5f) axis = V3(0.0f, 1.0f, 0.0f);
+    axis = Norm(axis, V3(0.0f, 1.0f, 0.0f));
+    const float ang = std::acos(d);
+    const float s = std::sin(ang * 0.5f);
+    return {axis.x * s, axis.y * s, axis.z * s, std::cos(ang * 0.5f)};
+}
+// Orientation of a quad whose front (+Z) faces back along dir (head -> screen): yaw then pitch, no roll.
+XrQuaternionf FacingQuat(const XrVector3f& dir) {
+    const float yaw = std::atan2(-dir.x, -dir.z);
+    const float pitch = std::asin(std::clamp(dir.y, -1.0f, 1.0f));
+    const XrQuaternionf qy{0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+    const XrQuaternionf qp{std::sin(pitch * 0.5f), 0.0f, 0.0f, std::cos(pitch * 0.5f)};
+    return {qy.w * qp.x + qy.x * qp.w + qy.y * qp.z - qy.z * qp.y,
+            qy.w * qp.y - qy.x * qp.z + qy.y * qp.w + qy.z * qp.x,
+            qy.w * qp.z + qy.x * qp.y - qy.y * qp.x + qy.z * qp.w,
+            qy.w * qp.w - qy.x * qp.x - qy.y * qp.y - qy.z * qp.z};
+}
+
+constexpr float kDefaultDist = 2.2f;
+constexpr float kDefaultHeight = 1.44f;
+constexpr float kMinDist = 0.6f, kMaxDist = 6.0f;
+constexpr float kMinHeight = 0.4f, kMaxHeight = 5.0f;
+constexpr float kStickDeadzone = 0.3f;
 
 }  // namespace
 
@@ -97,6 +145,34 @@ struct OpenXrTheater::Impl {
     XrSpace viewSpace = XR_NULL_HANDLE;
     XrPosef quadPose = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, -2.2f}};
     XrExtent2Df quadSize = {2.56f, 1.44f};
+
+    // Screen placement the player controls (both grips held = window mode), remembered in xr_view.txt.
+    float viewDist = kDefaultDist;      // metres from the head
+    float viewHeight = kDefaultHeight;  // quad height in metres (width follows the aspect)
+    float viewElev = 0.0f;              // radians above the horizon
+    bool darkMode = false;              // true = black void, false = passthrough (mixed reality)
+    bool grabActive = false;
+    bool viewDirty = false;
+    XrVector3f grabStartDir{0.0f, 0.0f, -1.0f};
+    XrVector3f grabStartOffset{0.0f, 0.0f, -kDefaultDist};
+    float grabStartHand = 0.4f;
+    float grabStartDist = kDefaultDist;
+    bool prevBgChord = false;
+    bool prevResetChord = false;
+    XrAction aimPose = XR_NULL_HANDLE;
+    XrSpace aimSpace[2] = {XR_NULL_HANDLE, XR_NULL_HANDLE};
+    std::string prefsPath;
+
+    void UpdateQuadSize() {
+        const float aspect = quadEyeH ? float(quadEyeW) / float(quadEyeH) : 16.0f / 9.0f;
+        quadSize.height = viewHeight;
+        quadSize.width = viewHeight * aspect;
+    }
+    void LoadView();
+    void SaveView();
+    void ApplyBackground();
+    void UpdateGrab(bool active, float distStick, float sizeStick, XrTime t);
+    PFN_xrPassthroughLayerPauseFB pfnPassthroughLayerPause = nullptr;
 
     // Passthrough
     XrPassthroughFB passthrough = XR_NULL_HANDLE;
@@ -371,8 +447,7 @@ bool OpenXrTheater::Impl::RecreateQuadSwapchain(u32 eyeW, u32 eyeH, bool stereo)
     quadEyeW = eyeW;
     quadEyeH = eyeH;
     quadStereo = stereo;
-    quadSize.height = 1.44f;
-    quadSize.width = 1.44f * (float(eyeW) / float(eyeH));
+    UpdateQuadSize();
     return true;
 }
 
@@ -519,7 +594,8 @@ bool OpenXrTheater::Impl::CreateActions(std::string& error) {
         !makeAct("left_stick_click", XR_ACTION_TYPE_BOOLEAN_INPUT, leftStickClick) ||
         !makeAct("right_stick_click", XR_ACTION_TYPE_BOOLEAN_INPUT, rightStickClick) ||
         !makeAct("menu_click", XR_ACTION_TYPE_BOOLEAN_INPUT, menuClick) ||
-        !makeAct("haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT, haptic, handPaths, 2)) {
+        !makeAct("haptic", XR_ACTION_TYPE_VIBRATION_OUTPUT, haptic, handPaths, 2) ||
+        !makeAct("aim_pose", XR_ACTION_TYPE_POSE_INPUT, aimPose, handPaths, 2)) {
         error = "Failed creating OpenXR actions";
         return false;
     }
@@ -546,6 +622,8 @@ bool OpenXrTheater::Impl::CreateActions(std::string& error) {
         {menuClick, path("/user/hand/left/input/menu/click")},
         {haptic, path("/user/hand/left/output/haptic")},
         {haptic, path("/user/hand/right/output/haptic")},
+        {aimPose, path("/user/hand/left/input/aim/pose")},
+        {aimPose, path("/user/hand/right/input/aim/pose")},
     };
     auto suggestProfile = [&](const char* profileName, bool required) {
         XrInteractionProfileSuggestedBinding sb{XR_TYPE_INTERACTION_PROFILE_SUGGESTED_BINDING};
@@ -576,6 +654,13 @@ bool OpenXrTheater::Impl::CreateActions(std::string& error) {
         error = XrErr("xrAttachSessionActionSets", r);
         return false;
     }
+    for (int i = 0; i < 2; ++i) {
+        XrActionSpaceCreateInfo asci2{XR_TYPE_ACTION_SPACE_CREATE_INFO};
+        asci2.action = aimPose;
+        asci2.subactionPath = handPaths[i];
+        asci2.poseInActionSpace = {{0.0f, 0.0f, 0.0f, 1.0f}, {0.0f, 0.0f, 0.0f}};
+        if (XR_FAILED(xrCreateActionSpace(session, &asci2, &aimSpace[i]))) aimSpace[i] = XR_NULL_HANDLE;
+    }
     return true;
 }
 
@@ -587,6 +672,7 @@ void OpenXrTheater::Impl::InitPassthrough() {
     xrGetInstanceProcAddr(instance, "xrCreatePassthroughLayerFB", reinterpret_cast<PFN_xrVoidFunction*>(&pfnCreatePassthroughLayer));
     xrGetInstanceProcAddr(instance, "xrDestroyPassthroughLayerFB", reinterpret_cast<PFN_xrVoidFunction*>(&pfnDestroyPassthroughLayer));
     xrGetInstanceProcAddr(instance, "xrPassthroughLayerResumeFB", reinterpret_cast<PFN_xrVoidFunction*>(&pfnPassthroughLayerResume));
+    xrGetInstanceProcAddr(instance, "xrPassthroughLayerPauseFB", reinterpret_cast<PFN_xrVoidFunction*>(&pfnPassthroughLayerPause));
     if (!pfnCreatePassthrough || !pfnPassthroughStart || !pfnCreatePassthroughLayer || !pfnPassthroughLayerResume) return;
 
     XrPassthroughCreateInfoFB pci{XR_TYPE_PASSTHROUGH_CREATE_INFO_FB};
@@ -600,6 +686,98 @@ void OpenXrTheater::Impl::InitPassthrough() {
     if (XR_FAILED(pfnCreatePassthroughLayer(session, &plci, &passthroughLayer))) {
         passthroughLayer = XR_NULL_HANDLE;
     }
+    ApplyBackground();
+}
+
+// Dark mode pauses the passthrough layer (saves power) and leaves it out of the frame.
+void OpenXrTheater::Impl::ApplyBackground() {
+    if (!passthroughLayer) return;
+    if (darkMode) {
+        if (pfnPassthroughLayerPause) pfnPassthroughLayerPause(passthroughLayer);
+    } else {
+        if (pfnPassthroughLayerResume) pfnPassthroughLayerResume(passthroughLayer);
+    }
+    SDL_Log("OpenXR background: %s", darkMode ? "dark" : "mixed reality");
+}
+
+// xr_view.txt: "v1 <distance m> <height m> <elevation rad> <dark 0/1>"
+void OpenXrTheater::Impl::LoadView() {
+    if (const char* dir = SDL_GetAndroidExternalStoragePath()) prefsPath = std::string(dir) + "/xr_view.txt";
+    else if (const char* idir = SDL_GetAndroidInternalStoragePath()) prefsPath = std::string(idir) + "/xr_view.txt";
+    if (prefsPath.empty()) return;
+    FILE* f = std::fopen(prefsPath.c_str(), "r");
+    if (!f) return;
+    char tag[8] = {};
+    float d = 0, h = 0, e = 0;
+    int dark = 0;
+    if (std::fscanf(f, "%7s %f %f %f %d", tag, &d, &h, &e, &dark) == 5 && std::strcmp(tag, "v1") == 0) {
+        viewDist = std::clamp(d, kMinDist, kMaxDist);
+        viewHeight = std::clamp(h, kMinHeight, kMaxHeight);
+        viewElev = std::clamp(e, -1.2f, 1.2f);
+        darkMode = dark != 0;
+        SDL_Log("OpenXR view restored: dist %.2f m, height %.2f m, elev %.2f, dark %d", viewDist, viewHeight,
+                viewElev, (int)darkMode);
+    }
+    std::fclose(f);
+}
+
+void OpenXrTheater::Impl::SaveView() {
+    viewDirty = false;
+    if (prefsPath.empty()) return;
+    FILE* f = std::fopen(prefsPath.c_str(), "w");
+    if (!f) return;
+    std::fprintf(f, "v1 %.3f %.3f %.3f %d\n", viewDist, viewHeight, viewElev, darkMode ? 1 : 0);
+    std::fclose(f);
+}
+
+// Both grips held: the screen follows the hands (orbit around the head), pulling the hands apart pushes it
+// away, left stick Y = distance, right stick Y = size. Released: the placement is saved.
+void OpenXrTheater::Impl::UpdateGrab(bool active, float distStick, float sizeStick, XrTime t) {
+    if (!active) {
+        if (grabActive) {
+            grabActive = false;
+            viewDirty = true;
+        }
+        if (viewDirty) SaveView();
+        return;
+    }
+    if (t <= 0 || !viewSpace || !aimSpace[0] || !aimSpace[1]) return;
+    constexpr XrSpaceLocationFlags kValid = XR_SPACE_LOCATION_ORIENTATION_VALID_BIT | XR_SPACE_LOCATION_POSITION_VALID_BIT;
+    XrSpaceLocation head{XR_TYPE_SPACE_LOCATION}, hl{XR_TYPE_SPACE_LOCATION}, hr{XR_TYPE_SPACE_LOCATION};
+    if (XR_FAILED(xrLocateSpace(viewSpace, localSpace, t, &head)) || (head.locationFlags & kValid) != kValid) return;
+    if (XR_FAILED(xrLocateSpace(aimSpace[0], localSpace, t, &hl)) || (hl.locationFlags & kValid) != kValid) return;
+    if (XR_FAILED(xrLocateSpace(aimSpace[1], localSpace, t, &hr)) || (hr.locationFlags & kValid) != kValid) return;
+
+    const XrVector3f headPos = head.pose.position;
+    const XrVector3f mid = Mul(Add(hl.pose.position, hr.pose.position), 0.5f);
+    const XrVector3f aim = Norm(Add(Rotate(hl.pose.orientation, V3(0, 0, -1)), Rotate(hr.pose.orientation, V3(0, 0, -1))),
+                                V3(0, 0, -1));
+    const XrVector3f grabPt = Add(mid, Mul(aim, 0.38f));
+    const XrVector3f dir = Norm(Sub(grabPt, headPos), V3(0, 0, -1));
+    const float handDist = Len(Sub(hl.pose.position, hr.pose.position));
+
+    if (!grabActive) {
+        grabActive = true;
+        grabStartDir = dir;
+        grabStartHand = std::max(0.12f, handDist);
+        grabStartOffset = Sub(quadPose.position, headPos);
+        if (Len(grabStartOffset) < 0.2f) grabStartOffset = Mul(dir, viewDist);
+        grabStartDist = std::clamp(Len(grabStartOffset), kMinDist, kMaxDist);
+    }
+    if (std::abs(distStick) > kStickDeadzone) {
+        grabStartDist = std::clamp(grabStartDist + distStick * 0.025f, kMinDist, kMaxDist);
+    }
+    if (std::abs(sizeStick) > kStickDeadzone) {
+        viewHeight = std::clamp(viewHeight * (1.0f + sizeStick * 0.015f), kMinHeight, kMaxHeight);
+        UpdateQuadSize();
+    }
+    const float ratio = std::clamp(handDist / grabStartHand, 0.5f, 2.0f);
+    const float newDist = std::clamp(grabStartDist * ratio, kMinDist, kMaxDist);
+    const XrVector3f offDir = Norm(Rotate(QuatFromTo(grabStartDir, dir), Norm(grabStartOffset, dir)), dir);
+    quadPose.position = Add(headPos, Mul(offDir, newDist));
+    quadPose.orientation = FacingQuat(offDir);
+    viewDist = newDist;
+    viewElev = std::asin(std::clamp(offDir.y, -1.0f, 1.0f));
 }
 
 void OpenXrTheater::Impl::DoRecenter(XrTime displayTime) {
@@ -621,10 +799,10 @@ void OpenXrTheater::Impl::DoRecenter(XrTime displayTime) {
         fwdX /= len;
         fwdZ /= len;
     }
-    constexpr float kDist = 2.2f;
-    quadPose.position = {loc.pose.position.x + fwdX * kDist, loc.pose.position.y, loc.pose.position.z + fwdZ * kDist};
-    const float yaw = std::atan2(-fwdX, -fwdZ);
-    quadPose.orientation = {0.0f, std::sin(yaw * 0.5f), 0.0f, std::cos(yaw * 0.5f)};
+    const float ce = std::cos(viewElev), se = std::sin(viewElev);
+    const XrVector3f dir{fwdX * ce, se, fwdZ * ce};
+    quadPose.position = Add(loc.pose.position, Mul(dir, viewDist));
+    quadPose.orientation = FacingQuat(dir);
     recenterPending = false;
 }
 
@@ -681,6 +859,35 @@ void OpenXrTheater::Impl::SyncActions() {
     const bool stereoChord = lb && rb && l3 && !r3;
     if (stereoChord && !prevStereoChord) stereoTogglePending = true;
     prevStereoChord = stereoChord;
+
+    // Window mode (both grips held): move/size the screen; LB + RB + R3 toggles dark / mixed reality,
+    // LB + RB + Y resets the screen size and distance. The game gets no sticks or buttons meanwhile
+    // (except Menu = Back).
+    const bool windowMode = lb && rb;
+    const bool yBtn = readBool(btnY);
+    const bool bgChord = windowMode && r3 && !l3;
+    if (bgChord && !prevBgChord) {
+        darkMode = !darkMode;
+        ApplyBackground();
+        viewDirty = true;
+    }
+    prevBgChord = bgChord;
+    const bool resetChord = windowMode && yBtn;
+    if (resetChord && !prevResetChord) {
+        viewDist = kDefaultDist;
+        viewHeight = kDefaultHeight;
+        viewElev = 0.0f;
+        UpdateQuadSize();
+        grabActive = false;            // restart the grab from the reset placement
+        recenterPending = true;
+        viewDirty = true;
+    }
+    prevResetChord = resetChord;
+    if (!resetChord) UpdateGrab(windowMode, ls.y, rs.y, frameState.predictedDisplayTime);
+    if (windowMode) {
+        if (menu) gamepad.buttons |= 0x0020;            // Back
+        return;
+    }
 
     if (menu) {
         if (lb && rb) gamepad.buttons |= 0x0020;        // Back
@@ -751,6 +958,10 @@ void OpenXrTheater::Impl::Destroy() {
         passthrough = XR_NULL_HANDLE;
     }
     DestroySwapchains();
+    for (XrSpace& s : aimSpace) {
+        if (s) xrDestroySpace(s);
+        s = XR_NULL_HANDLE;
+    }
     if (localSpace) xrDestroySpace(localSpace);
     if (viewSpace) xrDestroySpace(viewSpace);
     if (actionSet) xrDestroyActionSet(actionSet);
@@ -907,6 +1118,7 @@ bool OpenXrTheater::Init(u32 width, u32 height, std::string& error, bool stereo)
         return false;
     }
 
+    d.LoadView();
     if (!d.CreateSwapchains(width, height, error) || !d.CreateActions(error)) {
         d.Destroy();
         return false;
@@ -1095,7 +1307,7 @@ void OpenXrTheater::EndFrame() {
 
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     XrCompositionLayerPassthroughFB passthroughComp{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
-    if (d.passthroughLayer) {
+    if (d.passthroughLayer && !d.darkMode) {
         passthroughComp.layerHandle = d.passthroughLayer;
         passthroughComp.flags = XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT;
         layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&passthroughComp));
@@ -1135,8 +1347,9 @@ void OpenXrTheater::EndFrame() {
             vkBeginCommandBuffer(d.cmdBuf, &cbi);
 
             VkClearValue clear{};
-            if (d.passthroughLayer) clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
-            else clear.color = {{0.02f, 0.02f, 0.04f, 1.0f}};
+            const bool mr = d.passthroughLayer && !d.darkMode;
+            if (mr) clear.color = {{0.0f, 0.0f, 0.0f, 0.0f}};
+            else clear.color = {{0.0f, 0.0f, 0.0f, 1.0f}};
 
             for (u32 eye = 0; eye < 2; ++eye) {
                 VkRenderPassBeginInfo rpbi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -1165,7 +1378,7 @@ void OpenXrTheater::EndFrame() {
                 projViews[eye].subImage.imageRect = {{0, 0}, {Impl::kProjDim, Impl::kProjDim}};
                 projViews[eye].subImage.imageArrayIndex = 0;
             }
-            projLayer.layerFlags = d.passthroughLayer ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
+            projLayer.layerFlags = mr ? XR_COMPOSITION_LAYER_BLEND_TEXTURE_SOURCE_ALPHA_BIT : 0;
             projLayer.space = d.localSpace;
             projLayer.viewCount = 2;
             projLayer.views = projViews;
