@@ -103,72 +103,79 @@ bool HasAllFilesAccess() {
     return ok;
 }
 
-// Asks the player first (all-files access, or the file picker instead); for access, opens the system page for this
-// app and waits for the player to confirm the return. True when access is on afterwards.
-bool AskAllFilesAccess() {
-    {
-        const SDL_MessageBoxButtonData buttons[] = {
-            {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Allow file access"},
-            {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Pick the file"}};
-        const SDL_MessageBoxData q = {SDL_MESSAGEBOX_INFORMATION, nullptr, "Futurama",
-                                      "Futurama needs your own Xbox disc image (.iso).\n\nAllow file access so the game "
-                                      "can find it in Download or /sdcard/Futurama, or pick the file yourself.",
-                                      2, buttons, nullptr};
-        int pressed = 0;
-        if (!SDL_ShowMessageBox(&q, &pressed) || pressed != 1) return false;
-    }
+// A question or message as a 2D panel (com.futuramarecomp.PanelActivity, android/app/src/main/java): the game's
+// activity is immersive VR, so SDL's message boxes inside it are never shown on Quest. Returns 1 for the first
+// button, 0 for the second / closed. action "files": the first button opens the all-files access page and counts
+// only once access is on.
+int ShowPanel(const std::string& text, const char* button1, const char* button2, const char* action) {
     JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
     jobject act = static_cast<jobject>(SDL_GetAndroidActivity());
-    if (!env || !act) return false;
-    jclass actCls = env->GetObjectClass(act);
-    jstring pkg = static_cast<jstring>(
-        env->CallObjectMethod(act, env->GetMethodID(actCls, "getPackageName", "()Ljava/lang/String;")));
-    std::string pkgName = "com.futuramarecomp.app";
-    if (pkg) {
-        if (const char* c = env->GetStringUTFChars(pkg, nullptr)) pkgName = c, env->ReleaseStringUTFChars(pkg, c);
-        env->DeleteLocalRef(pkg);
-    }
-    jclass uriCls = env->FindClass("android/net/Uri");
-    jclass intentCls = env->FindClass("android/content/Intent");
-    jmethodID ctor = env->GetMethodID(intentCls, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V");
-    jmethodID ctorPlain = env->GetMethodID(intentCls, "<init>", "(Ljava/lang/String;)V");
-    jmethodID start = env->GetMethodID(actCls, "startActivity", "(Landroid/content/Intent;)V");
-    jstring juri = env->NewStringUTF(("package:" + pkgName).c_str());
-    jobject u = env->CallStaticObjectMethod(uriCls, env->GetStaticMethodID(uriCls, "parse",
-                                                                           "(Ljava/lang/String;)Landroid/net/Uri;"), juri);
-    jstring perApp = env->NewStringUTF("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION");
-    jobject intent = env->NewObject(intentCls, ctor, perApp, u);
-    env->CallVoidMethod(act, start, intent);
-    bool started = !env->ExceptionCheck();
-    if (!started) {                                   // (no per-app page: the list of all apps)
+    if (!env || !act) return 0;
+    auto clear = [&] {
+        if (!env->ExceptionCheck()) return false;
+        env->ExceptionDescribe();
         env->ExceptionClear();
-        jstring all = env->NewStringUTF("android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION");
-        jobject intent2 = env->NewObject(intentCls, ctorPlain, all);
-        env->CallVoidMethod(act, start, intent2);
-        started = !env->ExceptionCheck();
-        if (!started) env->ExceptionClear();
-        env->DeleteLocalRef(intent2);
-        env->DeleteLocalRef(all);
+        return true;
+    };
+    jclass actCls = env->GetObjectClass(act);
+    jobject loader = env->CallObjectMethod(act, env->GetMethodID(actCls, "getClassLoader", "()Ljava/lang/ClassLoader;"));
+    jclass loaderCls = env->FindClass("java/lang/ClassLoader");
+    jstring name = env->NewStringUTF("com.futuramarecomp.PanelActivity");
+    jclass panel = static_cast<jclass>(env->CallObjectMethod(
+        loader, env->GetMethodID(loaderCls, "loadClass", "(Ljava/lang/String;)Ljava/lang/Class;"), name));
+    int answer = 0;
+    if (!clear() && panel) {
+        jfieldID resultId = env->GetStaticFieldID(panel, "result", "I");
+        env->SetStaticIntField(panel, resultId, -1);
+        jclass intentCls = env->FindClass("android/content/Intent");
+        jobject intent = env->NewObject(intentCls, env->GetMethodID(intentCls, "<init>", "(Landroid/content/Context;Ljava/lang/Class;)V"),
+                                        act, panel);
+        jmethodID putExtra = env->GetMethodID(intentCls, "putExtra", "(Ljava/lang/String;Ljava/lang/String;)Landroid/content/Intent;");
+        auto put = [&](const char* key, const char* value) {
+            if (!value) return;
+            jstring k = env->NewStringUTF(key), v = env->NewStringUTF(value);
+            env->DeleteLocalRef(env->CallObjectMethod(intent, putExtra, k, v));
+            env->DeleteLocalRef(k);
+            env->DeleteLocalRef(v);
+        };
+        put("text", text.c_str());
+        put("button1", button1);
+        put("button2", button2);
+        put("action", action);
+        env->DeleteLocalRef(env->CallObjectMethod(intent, env->GetMethodID(intentCls, "addFlags", "(I)Landroid/content/Intent;"),
+                                                  jint(0x10000000) /* FLAG_ACTIVITY_NEW_TASK */));
+        env->CallVoidMethod(act, env->GetMethodID(actCls, "startActivity", "(Landroid/content/Intent;)V"), intent);
+        if (!clear()) {
+            SDL_Log("launcher: panel shown");
+            for (;;) {   // (the game waits here; the panel answers on its own thread)
+                SDL_Event ev;
+                while (SDL_PollEvent(&ev)) {}
+                const jint r = env->GetStaticIntField(panel, resultId);
+                if (r >= 0) {
+                    answer = r;
+                    break;
+                }
+                SDL_Delay(100);
+            }
+            SDL_Log("launcher: panel answer %d", answer);
+        }
+        env->DeleteLocalRef(intent);
+        env->DeleteLocalRef(intentCls);
+        env->DeleteLocalRef(panel);
     }
-    env->DeleteLocalRef(intent);
-    env->DeleteLocalRef(perApp);
-    if (u) env->DeleteLocalRef(u);
-    env->DeleteLocalRef(juri);
-    env->DeleteLocalRef(intentCls);
-    env->DeleteLocalRef(uriCls);
+    env->DeleteLocalRef(name);
+    env->DeleteLocalRef(loaderCls);
+    if (loader) env->DeleteLocalRef(loader);
     env->DeleteLocalRef(actCls);
     env->DeleteLocalRef(act);
-    if (!started) return false;
-    SDL_Log("launcher: asked for all-files access");
-    // The page opens beside the game on Quest (no reliable focus change), so the player confirms the return.
-    const SDL_MessageBoxButtonData ok[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT,
-                                            1, "Continue"}};
-    const SDL_MessageBoxData box = {SDL_MESSAGEBOX_INFORMATION, nullptr, "Futurama",
-                                    "Turn on \"Allow access to manage all files\" for Futurama in the page that "
-                                    "opened, then come back and press Continue.",
-                                    1, ok, nullptr};
-    int pressed = 0;
-    SDL_ShowMessageBox(&box, &pressed);
+    return answer;
+}
+
+// Asks for all-files access (or the file picker instead). True when access is on afterwards.
+bool AskAllFilesAccess() {
+    ShowPanel("Futurama needs your own Xbox disc image (.iso).\n\nAllow file access so the game can find it in "
+              "Download or /sdcard/Futurama, or pick the file yourself.",
+              "Allow file access", "Pick the file", "files");
     return HasAllFilesAccess();
 }
 
@@ -343,6 +350,10 @@ bool SetUpConsole() {
 }
 
 void ErrorBox(const std::string& text) {
+#ifdef __ANDROID__
+    ShowPanel(text, "OK", nullptr, nullptr);          // (a message box in the VR activity is never shown)
+    return;
+#endif
     SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Futurama", text.c_str(), nullptr);
 }
 

@@ -78,5 +78,13 @@
                 <action android:name="android.hardware.usb.action.USB_DEVICE_ATTACHED" />
             </intent-filter>
         </activity>
+        <!-- the launcher's 2D panel (disc setup questions): dialogs inside the VR activity are not shown on Quest -->
+        <activity
+            android:name="com.futuramarecomp.PanelActivity"
+            android:exported="false"
+            android:excludeFromRecents="true"
+            android:label="Futurama"
+            android:taskAffinity="com.futuramarecomp.panel"
+            android:theme="@android:style/Theme.DeviceDefault.Dialog" />
     </application>
 </manifest>
