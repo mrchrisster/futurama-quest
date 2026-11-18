@@ -86,7 +86,12 @@ XrQuaternionf FacingQuat(const XrVector3f& dir) {
             qy.w * qp.w - qy.x * qp.x - qy.y * qp.y - qy.z * qp.z};
 }
 
-constexpr float kDefaultDist = 2.2f;
+// Defaults = Christoph's own placement and settings (2026-11-17): 1.8 m away, 1.44 m tall, slightly above eye
+// level, dark room, 3D on, 4:3.
+constexpr float kDefaultDist = 1.8f;
+constexpr float kDefaultElev = 0.077f;   // radians above the horizon
+constexpr bool kDefaultDark = true;
+constexpr bool kDefaultAspect43 = true;
 constexpr float kDefaultHeight = 1.44f;
 constexpr float kMinDist = 0.6f, kMaxDist = 6.0f;
 constexpr float kMinHeight = 0.4f, kMaxHeight = 5.0f;
@@ -231,8 +236,8 @@ struct OpenXrTheater::Impl {
     // Screen placement the player controls (both grips held = window mode), remembered in xr_view.txt.
     float viewDist = kDefaultDist;      // metres from the head
     float viewHeight = kDefaultHeight;  // quad height in metres (width follows the aspect)
-    float viewElev = 0.0f;              // radians above the horizon
-    bool darkMode = false;              // true = black void, false = passthrough (mixed reality)
+    float viewElev = kDefaultElev;      // radians above the horizon
+    bool darkMode = kDefaultDark;       // true = black void, false = passthrough (mixed reality)
     bool grabActive = false;
     bool viewDirty = false;
     XrVector3f grabStartDir{0.0f, 0.0f, -1.0f};
@@ -263,8 +268,8 @@ struct OpenXrTheater::Impl {
     bool exitArmed = false;
     bool exitRequested = false;
     bool stereoState = true;
-    bool aspect43 = false;          // saved choice
-    bool startupAspect43 = false;   // what this run was started with
+    bool aspect43 = kDefaultAspect43;          // saved choice
+    bool startupAspect43 = kDefaultAspect43;   // what this run was started with
     bool menuHeld = false;
     int startPulse = 0;             // frames left of a Start press from a short Menu tap
     bool prevNav[6] = {};           // up, down, left, right, A, B
@@ -822,8 +827,8 @@ void OpenXrTheater::Impl::ApplyBackground() {
 // xr_view.txt: "v2 <distance m> <height m> <elevation rad> <dark 0/1> <3d 0/1> <aspect 4:3 0/1>" (v1: first five)
 namespace {
 struct SavedView {
-    float dist = kDefaultDist, height = kDefaultHeight, elev = 0.0f;
-    int dark = 0, stereo = 1, aspect43 = 0;
+    float dist = kDefaultDist, height = kDefaultHeight, elev = kDefaultElev;
+    int dark = kDefaultDark, stereo = 1, aspect43 = kDefaultAspect43;
 };
 std::string PrefsPath() {
     if (const char* dir = SDL_GetAndroidExternalStoragePath()) return std::string(dir) + "/xr_view.txt";
@@ -1018,7 +1023,7 @@ void OpenXrTheater::Impl::SyncActions() {
     if (resetChord && !prevResetChord) {
         viewDist = kDefaultDist;
         viewHeight = kDefaultHeight;
-        viewElev = 0.0f;
+        viewElev = kDefaultElev;
         UpdateQuadSize();
         grabActive = false;            // restart the grab from the reset placement
         recenterPending = true;
@@ -1560,7 +1565,7 @@ void OpenXrTheater::Impl::MenuActivate(int dir) {
         if (dir == 0) {
             viewDist = kDefaultDist;
             viewHeight = kDefaultHeight;
-            viewElev = 0.0f;
+            viewElev = kDefaultElev;
             UpdateQuadSize();
             recenterPending = true;
             SaveView();

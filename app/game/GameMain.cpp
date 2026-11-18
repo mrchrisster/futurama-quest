@@ -204,11 +204,9 @@ int main(int argc, char** argv) {
     std::filesystem::path saveDir = SaveFolder();     // (--saves <dir>)
 #ifdef FUT_USE_OPENXR
     {   // the VR menu's saved choices that shape the renderer: 3D on/off and the 4:3 canvas (a 960 x 720 eye)
-        bool savedStereo = stereo, saved43 = false;
-        if (platform::OpenXrTheater::LoadStartupPrefs(savedStereo, saved43)) {
-            stereo = savedStereo;
-            if (saved43) aspect = 4.0 / 3.0, width = 960;
-        }
+        bool savedStereo = stereo, saved43 = true;   // (nothing saved yet: 3D on, 4:3, the menu's defaults)
+        if (platform::OpenXrTheater::LoadStartupPrefs(savedStereo, saved43)) stereo = savedStereo;
+        if (saved43) aspect = 4.0 / 3.0, width = 960;
     }
 #endif
     for (int i = hasSourceArg ? 2 : 1; i < argc; ++i) {
