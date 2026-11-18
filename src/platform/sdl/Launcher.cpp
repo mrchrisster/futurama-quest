@@ -88,6 +88,90 @@ std::string OpenContentUri(const std::string& uri, bool persist) {
 }
 bool IsContentUri(const std::string& s) { return s.rfind("content://", 0) == 0; }
 
+// All-files access (MANAGE_EXTERNAL_STORAGE, "Allow access to manage all files" on Quest): lets the game read an
+// .iso straight from Download or /sdcard/Futurama. Without it only its own folder and picked files are readable.
+bool HasAllFilesAccess() {
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    if (!env || SDL_GetAndroidSDKVersion() < 30) return true;   // (older Android: the plain storage permission)
+    jclass envCls = env->FindClass("android/os/Environment");
+    const jboolean ok = env->CallStaticBooleanMethod(envCls, env->GetStaticMethodID(envCls, "isExternalStorageManager", "()Z"));
+    env->DeleteLocalRef(envCls);
+    if (env->ExceptionCheck()) {
+        env->ExceptionClear();
+        return false;
+    }
+    return ok;
+}
+
+// Asks the player first (all-files access, or the file picker instead); for access, opens the system page for this
+// app and waits for the player to confirm the return. True when access is on afterwards.
+bool AskAllFilesAccess() {
+    {
+        const SDL_MessageBoxButtonData buttons[] = {
+            {SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT, 1, "Allow file access"},
+            {SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT, 0, "Pick the file"}};
+        const SDL_MessageBoxData q = {SDL_MESSAGEBOX_INFORMATION, nullptr, "Futurama",
+                                      "Futurama needs your own Xbox disc image (.iso).\n\nAllow file access so the game "
+                                      "can find it in Download or /sdcard/Futurama, or pick the file yourself.",
+                                      2, buttons, nullptr};
+        int pressed = 0;
+        if (!SDL_ShowMessageBox(&q, &pressed) || pressed != 1) return false;
+    }
+    JNIEnv* env = static_cast<JNIEnv*>(SDL_GetAndroidJNIEnv());
+    jobject act = static_cast<jobject>(SDL_GetAndroidActivity());
+    if (!env || !act) return false;
+    jclass actCls = env->GetObjectClass(act);
+    jstring pkg = static_cast<jstring>(
+        env->CallObjectMethod(act, env->GetMethodID(actCls, "getPackageName", "()Ljava/lang/String;")));
+    std::string pkgName = "com.futuramarecomp.app";
+    if (pkg) {
+        if (const char* c = env->GetStringUTFChars(pkg, nullptr)) pkgName = c, env->ReleaseStringUTFChars(pkg, c);
+        env->DeleteLocalRef(pkg);
+    }
+    jclass uriCls = env->FindClass("android/net/Uri");
+    jclass intentCls = env->FindClass("android/content/Intent");
+    jmethodID ctor = env->GetMethodID(intentCls, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V");
+    jmethodID ctorPlain = env->GetMethodID(intentCls, "<init>", "(Ljava/lang/String;)V");
+    jmethodID start = env->GetMethodID(actCls, "startActivity", "(Landroid/content/Intent;)V");
+    jstring juri = env->NewStringUTF(("package:" + pkgName).c_str());
+    jobject u = env->CallStaticObjectMethod(uriCls, env->GetStaticMethodID(uriCls, "parse",
+                                                                           "(Ljava/lang/String;)Landroid/net/Uri;"), juri);
+    jstring perApp = env->NewStringUTF("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION");
+    jobject intent = env->NewObject(intentCls, ctor, perApp, u);
+    env->CallVoidMethod(act, start, intent);
+    bool started = !env->ExceptionCheck();
+    if (!started) {                                   // (no per-app page: the list of all apps)
+        env->ExceptionClear();
+        jstring all = env->NewStringUTF("android.settings.MANAGE_ALL_FILES_ACCESS_PERMISSION");
+        jobject intent2 = env->NewObject(intentCls, ctorPlain, all);
+        env->CallVoidMethod(act, start, intent2);
+        started = !env->ExceptionCheck();
+        if (!started) env->ExceptionClear();
+        env->DeleteLocalRef(intent2);
+        env->DeleteLocalRef(all);
+    }
+    env->DeleteLocalRef(intent);
+    env->DeleteLocalRef(perApp);
+    if (u) env->DeleteLocalRef(u);
+    env->DeleteLocalRef(juri);
+    env->DeleteLocalRef(intentCls);
+    env->DeleteLocalRef(uriCls);
+    env->DeleteLocalRef(actCls);
+    env->DeleteLocalRef(act);
+    if (!started) return false;
+    SDL_Log("launcher: asked for all-files access");
+    // The page opens beside the game on Quest (no reliable focus change), so the player confirms the return.
+    const SDL_MessageBoxButtonData ok[] = {{SDL_MESSAGEBOX_BUTTON_RETURNKEY_DEFAULT | SDL_MESSAGEBOX_BUTTON_ESCAPEKEY_DEFAULT,
+                                            1, "Continue"}};
+    const SDL_MessageBoxData box = {SDL_MESSAGEBOX_INFORMATION, nullptr, "Futurama",
+                                    "Turn on \"Allow access to manage all files\" for Futurama in the page that "
+                                    "opened, then come back and press Continue.",
+                                    1, ok, nullptr};
+    int pressed = 0;
+    SDL_ShowMessageBox(&box, &pressed);
+    return HasAllFilesAccess();
+}
+
 // The launch intent's data URI, when the game was opened on a file ("Open with" from a file manager, or
 // am start -d <uri> --grant-read-uri-permission). Empty otherwise.
 std::string LaunchIntentUri() {
@@ -324,9 +408,16 @@ std::string FindDisc(const std::function<bool(const std::string& source, std::st
             dirs.push_back(PathOf(ext));
         }
         dirs.push_back(PrefFolder());
+        const size_t firstShared = dirs.size();
         dirs.push_back(sfs::path("/sdcard/Futurama"));
         dirs.push_back(sfs::path("/sdcard/Download"));
-        for (const sfs::path& d : dirs) {
+        for (size_t di = 0; di < dirs.size(); ++di) {
+            const sfs::path& d = dirs[di];
+            // (the shared folders need all-files access: asked for once, when the app's own folders had no disc)
+            if (di == firstShared && !HasAllFilesAccess()) {
+                const bool granted = AskAllFilesAccess();
+                SDL_Log("launcher: all-files access %s", granted ? "granted" : "not granted");
+            }
             if (d.empty() || !sfs::exists(d, ec)) continue;
             for (const sfs::path& p : NextToExe(d)) {
                 if (test(p, source)) {

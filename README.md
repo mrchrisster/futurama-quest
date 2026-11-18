@@ -28,11 +28,14 @@ No game data is included in this repository or release APK. You need your own or
    adb install -r futurama-quest-v0.1.5.apk
    ```
 2. Copy your Xbox Futurama disc image (`.iso`, NTSC-U or PAL) onto the headset, for example into `Download`.
-3. Launch **Futurama** from **Unknown Sources** in your Quest library. On the first start a file picker opens: pick
-   your `.iso` (in the picker's Recent list or under Download). The game remembers it, so this happens only once.
+3. Launch **Futurama** from **Unknown Sources** in your Quest library. On the first start the game asks for file
+   access:
+   - **Allow file access** opens the Quest's page for it: turn on *Allow access to manage all files*, come back and
+     press *Continue*. The game then finds any `*futurama*.iso` in `Download` or `/sdcard/Futurama`.
+   - **Pick the file** opens the file picker instead: pick your `.iso` (Recent list or Download).
 
-   The app has no storage permission, so it can only read the disc through that picker. Alternatively, put the `.iso`
-   straight into the app's own folder with adb or SideQuest, and no picker is needed:
+   Either way the game remembers the disc, so this happens only once. Or put the `.iso` straight into the app's own
+   folder with adb or SideQuest, and no question is asked:
    ```sh
    adb push "Futurama (USA).iso" /sdcard/Android/data/com.futuramarecomp.app/files/
    ```
