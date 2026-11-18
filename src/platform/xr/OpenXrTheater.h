@@ -37,7 +37,7 @@ public:
     void SetHaptics(u16 left, u16 right);
     void Recenter();
 
-    // VR options menu (hold Menu ~0.5 s to open; a tap is still Start). While it is open the game should be
+    // VR options menu (L3 + R3 opens / closes it; Menu stays Start). While it is open the game should be
     // paused: GameMain skips App::Frame and pauses the sound output.
     bool MenuOpen() const;
     bool ConsumeExitRequest();

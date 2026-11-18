@@ -94,7 +94,6 @@ constexpr float kStickDeadzone = 0.3f;
 
 // ---- VR menu panel drawing (RGBA8, rows top-down) ----
 constexpr u32 kMenuW = 960, kMenuH = 720;
-constexpr u32 kMenuHoldMs = 500;   // hold Menu this long to open the VR menu (a shorter tap = Start)
 
 struct Glyph5x7 {
     char ch;
@@ -267,8 +266,6 @@ struct OpenXrTheater::Impl {
     bool aspect43 = false;          // saved choice
     bool startupAspect43 = false;   // what this run was started with
     bool menuHeld = false;
-    bool menuLongFired = false;
-    u64 menuDownMs = 0;
     int startPulse = 0;             // frames left of a Start press from a short Menu tap
     bool prevNav[6] = {};           // up, down, left, right, A, B
     XrSwapchain menuSwapchain = XR_NULL_HANDLE;
@@ -994,8 +991,10 @@ void OpenXrTheater::Impl::SyncActions() {
     const bool r3 = readBool(rightStickClick);
     const bool menu = readBool(menuClick);
 
+    // L3 + R3 (both stick clicks) opens / closes the VR menu. (The Quest runtime only reports the Menu button
+    // as a short pulse on release, so a long press cannot be used; a Menu tap stays Start.)
     const bool chord = l3 && r3;
-    if (chord && !prevRecenterChord) recenterPending = true;
+    if (chord && !prevRecenterChord) SetMenuOpen(!menuOpen);
     prevRecenterChord = chord;
 
     // LB + RB + L3 (without R3) live-toggles stereoscopic 3D window mode.
@@ -1032,22 +1031,9 @@ void OpenXrTheater::Impl::SyncActions() {
         return;
     }
 
-    // Menu button: a tap is Start (sent on release, for a few frames), holding it opens / closes the VR menu.
-    const u64 nowMs = SDL_GetTicks();
-    bool menuTap = false;
-    if (menu) {
-        if (!menuHeld) {
-            menuHeld = true;
-            menuDownMs = nowMs;
-            menuLongFired = false;
-        } else if (!menuLongFired && nowMs - menuDownMs >= kMenuHoldMs) {
-            menuLongFired = true;
-            SetMenuOpen(!menuOpen);
-        }
-    } else if (menuHeld) {
-        menuHeld = false;
-        menuTap = !menuLongFired;
-    }
+    // Menu button = Start. The runtime reports it as a brief pulse, so the press is held for a few frames.
+    const bool menuTap = menu && !menuHeld;
+    menuHeld = menu;
     if (menuOpen) {                                     // the game gets nothing while the menu is up
         if (menuTap) {
             SetMenuOpen(false);
@@ -1531,7 +1517,7 @@ void OpenXrTheater::Impl::DrawMenu() {
     }
     if (aspect43 != startupAspect43)
         MenuText(img, 44, kMenuH - 92, 4, 0xF5C842FFu, "ASPECT CHANGES AFTER A RESTART");
-    MenuText(img, 44, kMenuH - 44, 3, 0xB8C4E0FFu, "STICK: CHANGE  A: OK  B: CLOSE  GRIPS: MOVE");
+    MenuText(img, 44, kMenuH - 44, 3, 0xB8C4E0FFu, "STICK: CHANGE  A: OK  B: CLOSE  L3+R3: CLOSE");
     std::memcpy(menuMapped, img.data(), img.size());
 }
 
