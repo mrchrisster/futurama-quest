@@ -50,7 +50,7 @@ No game data is included in this repository or release APK. You need your own or
 | Left / Right Grip (`LB` / `RB`) | White / Black |
 | Left / Right Stick Click (`L3` / `R3`) | Left / Right Thumb |
 | Left Menu Button | Start |
-| **`L3 + R3` (click both sticks)** | **VR menu** (game pauses): background dark / mixed reality, 3D on/off, 4:3 / 16:9 (after a restart), recenter, reset screen size, exit |
+| **`L3 + R3` (click both sticks)** | **VR menu** (game pauses): background dark / mixed reality, 3D depth (off / normal / deep / extra), 4:3 / 16:9 (after a restart), recenter, reset screen size, exit |
 | `LB + RB + Menu` | Back |
 | **`LB + RB + L3`** | **Toggle Stereoscopic 3D / Flat 2D live** |
 | **Hold `LB + RB` (both grips)** | **Window mode: move the screen with your hands, pull hands apart / together for distance** |

@@ -203,9 +203,11 @@ int main(int argc, char** argv) {
 #endif
     std::filesystem::path saveDir = SaveFolder();     // (--saves <dir>)
 #ifdef FUT_USE_OPENXR
+    int depthLevel = 1;                               // VR menu 3D DEPTH: 0 off, 1 normal, 2 deep, 3 extra
     {   // the VR menu's saved choices that shape the renderer: 3D on/off and the 4:3 canvas (a 960 x 720 eye)
-        bool savedStereo = stereo, saved43 = true;   // (nothing saved yet: 3D on, 4:3, the menu's defaults)
-        if (platform::OpenXrTheater::LoadStartupPrefs(savedStereo, saved43)) stereo = savedStereo;
+        bool saved43 = true;                          // (nothing saved yet: 3D normal, 4:3, the menu's defaults)
+        if (platform::OpenXrTheater::LoadStartupPrefs(depthLevel, saved43)) stereo = depthLevel > 0;
+        else depthLevel = stereo ? 1 : 0;
         if (saved43) aspect = 4.0 / 3.0, width = 960;
     }
 #endif
@@ -266,7 +268,8 @@ int main(int argc, char** argv) {
     if (!window.Create("Futurama", 64, 64, false, false)) return fail("window creation failed", 1);
     platform::OpenXrTheater xr;
     if (!xr.Init(width, height, error, stereo)) return fail(error, 1);
-    xr.SetStereoState(stereo);
+    if (!stereo) depthLevel = 0;                      // (--2d)
+    xr.SetDepthLevel(depthLevel);
     {   // the menu header: the FUTURAMA logo from the disc's loading screen (640 x 480 RGB565 in a 1024 x 512
         // texture, the last 1 MB of the .nif)
         std::vector<u8> nif;
@@ -307,7 +310,7 @@ int main(int argc, char** argv) {
     }
     device.SetRenderScale(renderScale);               // (before Init: the targets are made at the scale)
 #ifdef FUT_USE_OPENXR
-    device.SetStereo(stereo, stereoStrength, stereoFocus);
+    device.SetStereo(stereo, stereoStrength * platform::OpenXrTheater::DepthScale(std::max(depthLevel, 1)), stereoFocus);
     if (!device.Init(nullptr, width, height, error)) return fail(error, 1);
     device.SetPresentCallback([&](const void* rgba, u32 w, u32 h) { xr.PresentFrame(rgba, w, h); });
     device.SetStereoPresentCallback([&](const void* leftRgba, const void* rightRgba, u32 w, u32 h) {
@@ -421,12 +424,12 @@ int main(int argc, char** argv) {
             SDL_Delay(8);
             continue;
         }
-        if (xr.ConsumeStereoToggle()) {
-            stereo = !stereo;
-            device.SetStereo(stereo, stereoStrength, stereoFocus);
-            xr.SetStereoState(stereo);
-            std::fprintf(stderr, "OpenXR 3D Window: %s (strength=%.3f, focus=%.1f)\n", stereo ? "ON" : "OFF",
-                         stereoStrength, stereoFocus);
+        if (int level = depthLevel; xr.ConsumeDepthChange(level)) {   // (VR menu 3D DEPTH, LB + RB + L3)
+            depthLevel = level;
+            stereo = level > 0;
+            const f32 strength = stereoStrength * platform::OpenXrTheater::DepthScale(std::max(level, 1));
+            device.SetStereo(stereo, strength, stereoFocus);
+            SDL_Log("OpenXR 3D depth level %d (strength=%.3f, focus=%.1f)", level, strength, stereoFocus);
         }
         if (xr.ConsumeExitRequest()) {
             xr.EndFrame();

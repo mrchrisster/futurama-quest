@@ -33,7 +33,9 @@ public:
     void EndFrame();
 
     const input::GamepadState& Gamepad() const;
-    bool ConsumeStereoToggle();
+    // 3D depth level 0 = off (flat), 1 = normal, 2 = deep, 3 = extra; changed from the VR menu or LB + RB + L3.
+    bool ConsumeDepthChange(int& level);
+    static float DepthScale(int level);   // the stereo strength factor of a level (0 for off)
     void SetHaptics(u16 left, u16 right);
     void Recenter();
 
@@ -44,10 +46,10 @@ public:
     // The game's own logo for the menu header (RGBA8, rows top-down), taken from the player's disc at startup.
     void SetMenuLogo(const u8* rgba, u32 width, u32 height);
     // GameMain reports the live 3D state so the menu shows it and the choice is remembered.
-    void SetStereoState(bool stereo);
+    void SetDepthLevel(int level);
     // Settings that must be known before the renderer is made (xr_view.txt): 3D on/off and the 4:3 canvas.
     // Returns false when nothing has been saved yet.
-    static bool LoadStartupPrefs(bool& stereo, bool& aspect43);
+    static bool LoadStartupPrefs(int& depthLevel, bool& aspect43);
 
 private:
     struct Impl;

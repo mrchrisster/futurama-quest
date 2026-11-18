@@ -267,7 +267,9 @@ struct OpenXrTheater::Impl {
     bool menuDirty = true;
     bool exitArmed = false;
     bool exitRequested = false;
-    bool stereoState = true;
+    int depthLevel = 1;             // 0 off, 1 normal, 2 deep, 3 extra
+    int lastDepthOn = 1;            // (LB + RB + L3 toggles between off and this)
+    bool depthPending = false;
     bool aspect43 = kDefaultAspect43;          // saved choice
     bool startupAspect43 = kDefaultAspect43;   // what this run was started with
     bool menuHeld = false;
@@ -347,7 +349,6 @@ struct OpenXrTheater::Impl {
     bool frameActive = false;
     bool recenterPending = false;
     bool prevRecenterChord = false;
-    bool stereoTogglePending = false;
     bool prevStereoChord = false;
 
     // Input actions (/interaction_profiles/oculus/touch_controller)
@@ -871,7 +872,7 @@ void OpenXrTheater::Impl::SaveView() {
     FILE* f = std::fopen(prefsPath.c_str(), "w");
     if (!f) return;
     std::fprintf(f, "v2 %.3f %.3f %.3f %d %d %d\n", viewDist, viewHeight, viewElev, darkMode ? 1 : 0,
-                 stereoState ? 1 : 0, aspect43 ? 1 : 0);
+                 depthLevel, aspect43 ? 1 : 0);
     std::fclose(f);
 }
 
@@ -1004,7 +1005,12 @@ void OpenXrTheater::Impl::SyncActions() {
 
     // LB + RB + L3 (without R3) live-toggles stereoscopic 3D window mode.
     const bool stereoChord = lb && rb && l3 && !r3;
-    if (stereoChord && !prevStereoChord) stereoTogglePending = true;
+    if (stereoChord && !prevStereoChord) {
+        if (depthLevel > 0) lastDepthOn = depthLevel, depthLevel = 0;
+        else depthLevel = lastDepthOn;
+        depthPending = true;
+        menuDirty = true;
+    }
     prevStereoChord = stereoChord;
 
     // Window mode (both grips held): move/size the screen; LB + RB + R3 toggles dark / mixed reality,
@@ -1501,9 +1507,10 @@ void OpenXrTheater::Impl::DrawMenu() {
         MenuText(img, (kMenuW - MenuTextWidth("FUTURAMA", 12)) / 2, 6 + (kBand - 84) / 2, 12, 0xF5C842FFu, "FUTURAMA");
     }
 
-    const char* labels[kMenuCount] = {"RESUME", "BACKGROUND", "3D", "ASPECT", "RECENTER SCREEN",
+    const char* labels[kMenuCount] = {"RESUME", "BACKGROUND", "3D DEPTH", "ASPECT", "RECENTER SCREEN",
                                       "RESET SCREEN SIZE", "EXIT GAME"};
-    const char* values[kMenuCount] = {"", darkMode ? "DARK ROOM" : "MIXED REALITY", stereoState ? "ON" : "OFF",
+    static const char* kDepthNames[4] = {"OFF", "NORMAL", "DEEP", "EXTRA"};
+    const char* values[kMenuCount] = {"", darkMode ? "DARK ROOM" : "MIXED REALITY", kDepthNames[std::clamp(depthLevel, 0, 3)],
                                       aspect43 ? "4:3" : "16:9", "", "", exitArmed ? "PRESS A AGAIN" : ""};
     if (!passthroughLayer) values[kMenuBackground] = "DARK ROOM";
     const int top = kBand + 6 + 22;
@@ -1551,8 +1558,11 @@ void OpenXrTheater::Impl::MenuActivate(int dir) {
         ApplyBackground();
         SaveView();
         break;
-    case kMenu3D:
-        stereoTogglePending = true;   // GameMain flips it and reports back through SetStereoState
+    case kMenu3D:   // (GameMain applies it through ConsumeDepthChange)
+        depthLevel = (depthLevel + (dir < 0 ? 3 : 1)) % 4;
+        if (depthLevel > 0) lastDepthOn = depthLevel;
+        depthPending = true;
+        SaveView();
         break;
     case kMenuAspect:
         aspect43 = !aspect43;
@@ -1780,10 +1790,17 @@ void OpenXrTheater::EndFrame() {
 
 const input::GamepadState& OpenXrTheater::Gamepad() const { return impl_->gamepad; }
 
-bool OpenXrTheater::ConsumeStereoToggle() {
-    const bool t = impl_->stereoTogglePending;
-    impl_->stereoTogglePending = false;
-    return t;
+bool OpenXrTheater::ConsumeDepthChange(int& level) {
+    Impl& d = *impl_;
+    if (!d.depthPending) return false;
+    d.depthPending = false;
+    level = d.depthLevel;
+    return true;
+}
+
+float OpenXrTheater::DepthScale(int level) {
+    static const float kScale[4] = {0.0f, 1.0f, 1.6f, 2.3f};
+    return kScale[std::clamp(level, 0, 3)];
 }
 
 void OpenXrTheater::Impl::LogActiveProfiles() {
@@ -1864,18 +1881,20 @@ void OpenXrTheater::SetMenuLogo(const u8* rgba, u32 width, u32 height) {
     d.menuDirty = true;
 }
 
-void OpenXrTheater::SetStereoState(bool stereo) {
+void OpenXrTheater::SetDepthLevel(int level) {
     Impl& d = *impl_;
-    if (d.stereoState == stereo) return;
-    d.stereoState = stereo;
+    level = std::clamp(level, 0, 3);
+    if (level > 0) d.lastDepthOn = level;
+    if (d.depthLevel == level) return;
+    d.depthLevel = level;
     d.menuDirty = true;
     d.SaveView();
 }
 
-bool OpenXrTheater::LoadStartupPrefs(bool& stereo, bool& aspect43) {
+bool OpenXrTheater::LoadStartupPrefs(int& depthLevel, bool& aspect43) {
     SavedView v;
     if (!ReadSavedView(PrefsPath(), v)) return false;
-    stereo = v.stereo != 0;
+    depthLevel = std::clamp(v.stereo, 0, 3);
     aspect43 = v.aspect43 != 0;
     return true;
 }
