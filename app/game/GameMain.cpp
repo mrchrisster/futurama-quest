@@ -202,6 +202,15 @@ int main(int argc, char** argv) {
     u32 aaSamples = 1, anisotropy = 1;                // (--aa / --anisotropic: the original sampling)
 #endif
     std::filesystem::path saveDir = SaveFolder();     // (--saves <dir>)
+#ifdef FUT_USE_OPENXR
+    {   // the VR menu's saved choices that shape the renderer: 3D on/off and the 4:3 canvas (a 960 x 720 eye)
+        bool savedStereo = stereo, saved43 = false;
+        if (platform::OpenXrTheater::LoadStartupPrefs(savedStereo, saved43)) {
+            stereo = savedStereo;
+            if (saved43) aspect = 4.0 / 3.0, width = 960;
+        }
+    }
+#endif
     for (int i = hasSourceArg ? 2 : 1; i < argc; ++i) {
         const std::string a = argv[i];
         if (a == "--size" && i + 1 < argc) std::sscanf(argv[++i], "%ux%u", &width, &height), fullscreen = false;
@@ -259,6 +268,27 @@ int main(int argc, char** argv) {
     if (!window.Create("Futurama", 64, 64, false, false)) return fail("window creation failed", 1);
     platform::OpenXrTheater xr;
     if (!xr.Init(width, height, error, stereo)) return fail(error, 1);
+    xr.SetStereoState(stereo);
+    {   // the menu header: the FUTURAMA logo from the disc's loading screen (640 x 480 RGB565 in a 1024 x 512
+        // texture, the last 1 MB of the .nif)
+        std::vector<u8> nif;
+        if (vfs.ReadFile("images/english/loadmenu.nif", nif) && nif.size() >= 1024 * 512 * 2) {
+            const u8* px = nif.data() + nif.size() - 1024 * 512 * 2;
+            constexpr u32 kX = 92, kY = 60, kW = 456, kH = 126;   // the logo's box (with the light rays behind it)
+            std::vector<u8> rgba(size_t(kW) * kH * 4);
+            for (u32 y = 0; y < kH; ++y)
+                for (u32 x = 0; x < kW; ++x) {
+                    const u32 o = ((kY + y) * 1024 + kX + x) * 2;
+                    const u32 v = u32(px[o]) | (u32(px[o + 1]) << 8);
+                    u8* d = &rgba[(size_t(y) * kW + x) * 4];
+                    d[0] = u8(((v >> 11) & 31) * 255 / 31);
+                    d[1] = u8(((v >> 5) & 63) * 255 / 63);
+                    d[2] = u8((v & 31) * 255 / 31);
+                    d[3] = 255;
+                }
+            xr.SetMenuLogo(rgba.data(), kW, kH);
+        }
+    }
 #else
     if (!window.Create("Futurama", width, height, false, fullscreen)) return fail("window creation failed", 1);
 #endif
@@ -366,7 +396,7 @@ int main(int argc, char** argv) {
     // (XGetLanguage: unset = English, the default; the PAL game's language choice comes later)
     text::CreateAppFont(sv.readFile);                 // App::Init's error overlay: font 0 (tex2)
     game::app::App app(sv);
-    const u64 base = platform::Window::Counter();
+    u64 base = platform::Window::Counter();
     app.qpc = 0;                                      // (the clock counts from the start: QPC - base)
 #ifdef FUT_USE_OPENXR
     app.input.onRumble = [&](const input::Pad& p) {
@@ -379,6 +409,8 @@ int main(int argc, char** argv) {
     const char* startLevel = nullptr;                 // (null = the boot)
     if (!app.Init(startLevel)) return fail("App::Init failed", 1);
 #ifdef FUT_USE_OPENXR
+    bool menuPaused = false;
+    u64 pauseStart = 0;
     for (s32 f = 0; window.Pump();) {
         bool xrQuit = false;
         xr.PollEvents(xrQuit);
@@ -394,8 +426,23 @@ int main(int argc, char** argv) {
         if (xr.ConsumeStereoToggle()) {
             stereo = !stereo;
             device.SetStereo(stereo, stereoStrength, stereoFocus);
+            xr.SetStereoState(stereo);
             std::fprintf(stderr, "OpenXR 3D Window: %s (strength=%.3f, focus=%.1f)\n", stereo ? "ON" : "OFF",
                          stereoStrength, stereoFocus);
+        }
+        if (xr.ConsumeExitRequest()) {
+            xr.EndFrame();
+            break;
+        }
+        if (const bool paused = xr.MenuOpen(); paused != menuPaused) {   // the VR menu pauses the game
+            menuPaused = paused;
+            if (!soundOffline) soundBackend.SetPaused(paused);
+            if (paused) pauseStart = platform::Window::Counter();
+            else base += platform::Window::Counter() - pauseStart;        // (the game's clock skips the pause)
+        }
+        if (menuPaused) {
+            xr.EndFrame();                            // (the last game frame stays on the screen)
+            continue;
         }
         gamepads.Poll();                              // (keep BT pads working alongside Quest Touch Plus)
         app.frame = f++;

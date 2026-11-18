@@ -92,6 +92,89 @@ constexpr float kMinDist = 0.6f, kMaxDist = 6.0f;
 constexpr float kMinHeight = 0.4f, kMaxHeight = 5.0f;
 constexpr float kStickDeadzone = 0.3f;
 
+// ---- VR menu panel drawing (RGBA8, rows top-down) ----
+constexpr u32 kMenuW = 960, kMenuH = 720;
+constexpr u32 kMenuHoldMs = 500;   // hold Menu this long to open the VR menu (a shorter tap = Start)
+
+struct Glyph5x7 {
+    char ch;
+    u8 col[5];   // LSB = top row
+};
+constexpr Glyph5x7 kFont5x7[] = {
+    {' ', {0x00, 0x00, 0x00, 0x00, 0x00}},
+    {':', {0x00, 0x36, 0x36, 0x00, 0x00}},
+    {'/', {0x20, 0x10, 0x08, 0x04, 0x02}},
+    {'-', {0x08, 0x08, 0x08, 0x08, 0x08}},
+    {'+', {0x08, 0x08, 0x3E, 0x08, 0x08}},
+    {'.', {0x00, 0x60, 0x60, 0x00, 0x00}},
+    {'!', {0x00, 0x00, 0x5F, 0x00, 0x00}},
+    {'|', {0x00, 0x00, 0x7F, 0x00, 0x00}},
+    {'=', {0x14, 0x14, 0x14, 0x14, 0x14}},
+    {'(', {0x00, 0x1C, 0x22, 0x41, 0x00}},
+    {')', {0x00, 0x41, 0x22, 0x1C, 0x00}},
+    {'0', {0x3E, 0x51, 0x49, 0x45, 0x3E}},
+    {'1', {0x00, 0x42, 0x7F, 0x40, 0x00}},
+    {'2', {0x42, 0x61, 0x51, 0x49, 0x46}},
+    {'3', {0x21, 0x41, 0x45, 0x4B, 0x31}},
+    {'4', {0x18, 0x14, 0x12, 0x7F, 0x10}},
+    {'5', {0x27, 0x45, 0x45, 0x45, 0x39}},
+    {'6', {0x3C, 0x4A, 0x49, 0x49, 0x30}},
+    {'7', {0x01, 0x71, 0x09, 0x05, 0x03}},
+    {'8', {0x36, 0x49, 0x49, 0x49, 0x36}},
+    {'9', {0x06, 0x49, 0x49, 0x29, 0x1E}},
+    {'A', {0x7E, 0x11, 0x11, 0x11, 0x7E}},
+    {'B', {0x7F, 0x49, 0x49, 0x49, 0x36}},
+    {'C', {0x3E, 0x41, 0x41, 0x41, 0x22}},
+    {'D', {0x7F, 0x41, 0x41, 0x22, 0x1C}},
+    {'E', {0x7F, 0x49, 0x49, 0x49, 0x41}},
+    {'F', {0x7F, 0x09, 0x09, 0x09, 0x01}},
+    {'G', {0x3E, 0x41, 0x49, 0x49, 0x7A}},
+    {'H', {0x7F, 0x08, 0x08, 0x08, 0x7F}},
+    {'I', {0x00, 0x41, 0x7F, 0x41, 0x00}},
+    {'J', {0x20, 0x40, 0x41, 0x3F, 0x01}},
+    {'K', {0x7F, 0x08, 0x14, 0x22, 0x41}},
+    {'L', {0x7F, 0x40, 0x40, 0x40, 0x40}},
+    {'M', {0x7F, 0x02, 0x0C, 0x02, 0x7F}},
+    {'N', {0x7F, 0x04, 0x08, 0x10, 0x7F}},
+    {'O', {0x3E, 0x41, 0x41, 0x41, 0x3E}},
+    {'P', {0x7F, 0x09, 0x09, 0x09, 0x06}},
+    {'Q', {0x3E, 0x41, 0x51, 0x21, 0x5E}},
+    {'R', {0x7F, 0x09, 0x19, 0x29, 0x46}},
+    {'S', {0x46, 0x49, 0x49, 0x49, 0x31}},
+    {'T', {0x01, 0x01, 0x7F, 0x01, 0x01}},
+    {'U', {0x3F, 0x40, 0x40, 0x40, 0x3F}},
+    {'V', {0x1F, 0x20, 0x40, 0x20, 0x1F}},
+    {'W', {0x3F, 0x40, 0x38, 0x40, 0x3F}},
+    {'X', {0x63, 0x14, 0x08, 0x14, 0x63}},
+    {'Y', {0x07, 0x08, 0x70, 0x08, 0x07}},
+    {'Z', {0x61, 0x51, 0x49, 0x45, 0x43}},
+};
+const u8* FindGlyph(char c) {
+    if (c >= 'a' && c <= 'z') c = static_cast<char>(c - 'a' + 'A');
+    for (const auto& g : kFont5x7)
+        if (g.ch == c) return g.col;
+    return kFont5x7[0].col;
+}
+void MenuFill(std::vector<u8>& img, int x0, int y0, int w, int h, u32 rgba) {
+    for (int y = std::max(0, y0); y < std::min<int>(kMenuH, y0 + h); ++y)
+        for (int x = std::max(0, x0); x < std::min<int>(kMenuW, x0 + w); ++x) {
+            u8* d = &img[(size_t(y) * kMenuW + x) * 4];
+            d[0] = u8(rgba >> 24), d[1] = u8(rgba >> 16), d[2] = u8(rgba >> 8), d[3] = u8(rgba);
+        }
+}
+void MenuText(std::vector<u8>& img, int x0, int y0, int scale, u32 rgba, const char* text) {
+    int cx = x0;
+    for (const char* p = text; *p; ++p, cx += 6 * scale) {
+        const u8* cols = FindGlyph(*p);
+        for (int gx = 0; gx < 5; ++gx)
+            for (int gy = 0; gy < 7; ++gy)
+                if (cols[gx] & (1u << gy)) MenuFill(img, cx + gx * scale, y0 + gy * scale, scale, scale, rgba);
+    }
+}
+int MenuTextWidth(const char* text, int scale) { return int(std::strlen(text)) * 6 * scale - scale; }
+
+enum MenuItem { kMenuResume, kMenuBackground, kMenu3D, kMenuAspect, kMenuRecenter, kMenuResetSize, kMenuExit, kMenuCount };
+
 }  // namespace
 
 struct OpenXrTheater::Impl {
@@ -174,6 +257,40 @@ struct OpenXrTheater::Impl {
     void UpdateGrab(bool active, float distStick, float sizeStick, XrTime t);
     PFN_xrPassthroughLayerPauseFB pfnPassthroughLayerPause = nullptr;
 
+    // VR options menu
+    bool menuOpen = false;
+    int menuSel = 0;
+    bool menuDirty = true;
+    bool exitArmed = false;
+    bool exitRequested = false;
+    bool stereoState = true;
+    bool aspect43 = false;          // saved choice
+    bool startupAspect43 = false;   // what this run was started with
+    bool menuHeld = false;
+    bool menuLongFired = false;
+    u64 menuDownMs = 0;
+    int startPulse = 0;             // frames left of a Start press from a short Menu tap
+    bool prevNav[6] = {};           // up, down, left, right, A, B
+    XrSwapchain menuSwapchain = XR_NULL_HANDLE;
+    std::vector<XrSwapchainImageVulkanKHR> menuImages;
+    VkBuffer menuBuf = VK_NULL_HANDLE;
+    VkDeviceMemory menuMem = VK_NULL_HANDLE;
+    void* menuMapped = nullptr;
+    std::vector<u8> logo;
+    u32 logoW = 0, logoH = 0;
+
+    bool CreateMenuSwapchain();
+    void DrawMenu();
+    void MenuInput(bool up, bool down, bool left, bool right, bool a, bool b);
+    void MenuActivate(int dir);
+    void SetMenuOpen(bool open) {
+        menuOpen = open;
+        menuDirty = true;
+        exitArmed = false;
+        if (open) menuSel = 0;
+        for (bool& n : prevNav) n = true;   // ignore buttons already held when the menu opens
+    }
+
     // Passthrough
     XrPassthroughFB passthrough = XR_NULL_HANDLE;
     XrPassthroughLayerFB passthroughLayer = XR_NULL_HANDLE;
@@ -251,7 +368,11 @@ struct OpenXrTheater::Impl {
     bool CreateVulkan(std::string& error);
     bool CreateSwapchains(u32 w, u32 h, std::string& error);
     bool RecreateQuadSwapchain(u32 eyeW, u32 eyeH, bool stereo);
-    void UploadQuadRegions(const VkBufferImageCopy* regions, u32 regionCount);
+    bool UploadRegions(XrSwapchain sc, const std::vector<XrSwapchainImageVulkanKHR>& images, VkBuffer buf,
+                       const VkBufferImageCopy* regions, u32 regionCount);
+    void UploadQuadRegions(const VkBufferImageCopy* regions, u32 regionCount) {
+        if (UploadRegions(quadSwapchain, quadImages, stagingBuf, regions, regionCount)) hasQuadFrame = true;
+    }
     bool CreateActions(std::string& error);
     void InitPassthrough();
     void SyncActions();
@@ -554,6 +675,7 @@ bool OpenXrTheater::Impl::CreateSwapchains(u32 w, u32 h, std::string& error) {
         error = "Failed to create OpenXR quad swapchain";
         return false;
     }
+    if (!CreateMenuSwapchain()) SDL_Log("OpenXR: menu swapchain unavailable (the VR menu is off)");
     return true;
 }
 
@@ -700,25 +822,45 @@ void OpenXrTheater::Impl::ApplyBackground() {
     SDL_Log("OpenXR background: %s", darkMode ? "dark" : "mixed reality");
 }
 
-// xr_view.txt: "v1 <distance m> <height m> <elevation rad> <dark 0/1>"
-void OpenXrTheater::Impl::LoadView() {
-    if (const char* dir = SDL_GetAndroidExternalStoragePath()) prefsPath = std::string(dir) + "/xr_view.txt";
-    else if (const char* idir = SDL_GetAndroidInternalStoragePath()) prefsPath = std::string(idir) + "/xr_view.txt";
-    if (prefsPath.empty()) return;
-    FILE* f = std::fopen(prefsPath.c_str(), "r");
-    if (!f) return;
+// xr_view.txt: "v2 <distance m> <height m> <elevation rad> <dark 0/1> <3d 0/1> <aspect 4:3 0/1>" (v1: first five)
+namespace {
+struct SavedView {
+    float dist = kDefaultDist, height = kDefaultHeight, elev = 0.0f;
+    int dark = 0, stereo = 1, aspect43 = 0;
+};
+std::string PrefsPath() {
+    if (const char* dir = SDL_GetAndroidExternalStoragePath()) return std::string(dir) + "/xr_view.txt";
+    if (const char* idir = SDL_GetAndroidInternalStoragePath()) return std::string(idir) + "/xr_view.txt";
+    return {};
+}
+bool ReadSavedView(const std::string& path, SavedView& v) {
+    if (path.empty()) return false;
+    FILE* f = std::fopen(path.c_str(), "r");
+    if (!f) return false;
     char tag[8] = {};
-    float d = 0, h = 0, e = 0;
-    int dark = 0;
-    if (std::fscanf(f, "%7s %f %f %f %d", tag, &d, &h, &e, &dark) == 5 && std::strcmp(tag, "v1") == 0) {
-        viewDist = std::clamp(d, kMinDist, kMaxDist);
-        viewHeight = std::clamp(h, kMinHeight, kMaxHeight);
-        viewElev = std::clamp(e, -1.2f, 1.2f);
-        darkMode = dark != 0;
-        SDL_Log("OpenXR view restored: dist %.2f m, height %.2f m, elev %.2f, dark %d", viewDist, viewHeight,
-                viewElev, (int)darkMode);
-    }
+    const int n = std::fscanf(f, "%7s %f %f %f %d %d %d", tag, &v.dist, &v.height, &v.elev, &v.dark, &v.stereo,
+                              &v.aspect43);
     std::fclose(f);
+    if (std::strcmp(tag, "v2") == 0) return n == 7;
+    if (std::strcmp(tag, "v1") == 0 && n >= 5) {
+        v.stereo = 1, v.aspect43 = 0;
+        return true;
+    }
+    return false;
+}
+}  // namespace
+
+void OpenXrTheater::Impl::LoadView() {
+    prefsPath = PrefsPath();
+    SavedView v;
+    if (!ReadSavedView(prefsPath, v)) return;
+    viewDist = std::clamp(v.dist, kMinDist, kMaxDist);
+    viewHeight = std::clamp(v.height, kMinHeight, kMaxHeight);
+    viewElev = std::clamp(v.elev, -1.2f, 1.2f);
+    darkMode = v.dark != 0;
+    aspect43 = startupAspect43 = v.aspect43 != 0;
+    SDL_Log("OpenXR view restored: dist %.2f m, height %.2f m, elev %.2f, dark %d, 3d %d, 4:3 %d", viewDist,
+            viewHeight, viewElev, (int)darkMode, v.stereo, v.aspect43);
 }
 
 void OpenXrTheater::Impl::SaveView() {
@@ -726,7 +868,8 @@ void OpenXrTheater::Impl::SaveView() {
     if (prefsPath.empty()) return;
     FILE* f = std::fopen(prefsPath.c_str(), "w");
     if (!f) return;
-    std::fprintf(f, "v1 %.3f %.3f %.3f %d\n", viewDist, viewHeight, viewElev, darkMode ? 1 : 0);
+    std::fprintf(f, "v2 %.3f %.3f %.3f %d %d %d\n", viewDist, viewHeight, viewElev, darkMode ? 1 : 0,
+                 stereoState ? 1 : 0, aspect43 ? 1 : 0);
     std::fclose(f);
 }
 
@@ -889,9 +1032,36 @@ void OpenXrTheater::Impl::SyncActions() {
         return;
     }
 
+    // Menu button: a tap is Start (sent on release, for a few frames), holding it opens / closes the VR menu.
+    const u64 nowMs = SDL_GetTicks();
+    bool menuTap = false;
     if (menu) {
-        if (lb && rb) gamepad.buttons |= 0x0020;        // Back
-        else gamepad.buttons |= 0x0010;                 // Start
+        if (!menuHeld) {
+            menuHeld = true;
+            menuDownMs = nowMs;
+            menuLongFired = false;
+        } else if (!menuLongFired && nowMs - menuDownMs >= kMenuHoldMs) {
+            menuLongFired = true;
+            SetMenuOpen(!menuOpen);
+        }
+    } else if (menuHeld) {
+        menuHeld = false;
+        menuTap = !menuLongFired;
+    }
+    if (menuOpen) {                                     // the game gets nothing while the menu is up
+        if (menuTap) {
+            SetMenuOpen(false);
+            return;
+        }
+        constexpr float kNav = 0.6f;
+        MenuInput(ls.y > kNav || rs.y > kNav, ls.y < -kNav || rs.y < -kNav, ls.x < -kNav || rs.x < -kNav,
+                  ls.x > kNav || rs.x > kNav, readBool(btnA), readBool(btnB));
+        return;
+    }
+    if (menuTap) startPulse = 6;
+    if (startPulse > 0) {
+        gamepad.buttons |= 0x0010;                      // Start
+        --startPulse;
     }
     if (l3) gamepad.buttons |= 0x0040;
     if (r3) gamepad.buttons |= 0x0080;
@@ -933,6 +1103,17 @@ void OpenXrTheater::Impl::DestroySwapchains() {
         quadSwapchain = XR_NULL_HANDLE;
     }
     quadImages.clear();
+    if (menuMapped) {
+        vkUnmapMemory(vkDevice, menuMem);
+        menuMapped = nullptr;
+    }
+    if (menuBuf) vkDestroyBuffer(vkDevice, menuBuf, nullptr);
+    if (menuMem) vkFreeMemory(vkDevice, menuMem, nullptr);
+    menuBuf = VK_NULL_HANDLE;
+    menuMem = VK_NULL_HANDLE;
+    if (menuSwapchain) xrDestroySwapchain(menuSwapchain);
+    menuSwapchain = XR_NULL_HANDLE;
+    menuImages.clear();
     for (u32 e = 0; e < 2; ++e) {
         for (VkFramebuffer fb : eyes[e].framebuffers)
             if (fb) vkDestroyFramebuffer(vkDevice, fb, nullptr);
@@ -1203,17 +1384,18 @@ bool OpenXrTheater::BeginFrame() {
     return true;
 }
 
-void OpenXrTheater::Impl::UploadQuadRegions(const VkBufferImageCopy* regions, u32 regionCount) {
+bool OpenXrTheater::Impl::UploadRegions(XrSwapchain sc, const std::vector<XrSwapchainImageVulkanKHR>& images,
+                                        VkBuffer buf, const VkBufferImageCopy* regions, u32 regionCount) {
     u32 idx = 0;
     XrSwapchainImageAcquireInfo ai{XR_TYPE_SWAPCHAIN_IMAGE_ACQUIRE_INFO};
-    if (XR_FAILED(xrAcquireSwapchainImage(quadSwapchain, &ai, &idx))) return;
+    if (XR_FAILED(xrAcquireSwapchainImage(sc, &ai, &idx))) return false;
 
     XrSwapchainImageWaitInfo wi{XR_TYPE_SWAPCHAIN_IMAGE_WAIT_INFO};
     wi.timeout = XR_INFINITE_DURATION;
-    if (XR_FAILED(xrWaitSwapchainImage(quadSwapchain, &wi))) {
+    if (XR_FAILED(xrWaitSwapchainImage(sc, &wi))) {
         XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-        xrReleaseSwapchainImage(quadSwapchain, &ri);
-        return;
+        xrReleaseSwapchainImage(sc, &ri);
+        return false;
     }
 
     vkResetCommandBuffer(cmdBuf, 0);
@@ -1221,7 +1403,7 @@ void OpenXrTheater::Impl::UploadQuadRegions(const VkBufferImageCopy* regions, u3
     cbi.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmdBuf, &cbi);
 
-    VkImage img = quadImages[idx].image;
+    VkImage img = images[idx].image;
     VkImageMemoryBarrier toDst{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toDst.dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
     toDst.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -1233,7 +1415,7 @@ void OpenXrTheater::Impl::UploadQuadRegions(const VkBufferImageCopy* regions, u3
     vkCmdPipelineBarrier(cmdBuf, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT,
                          0, 0, nullptr, 0, nullptr, 1, &toDst);
 
-    vkCmdCopyBufferToImage(cmdBuf, stagingBuf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regionCount, regions);
+    vkCmdCopyBufferToImage(cmdBuf, buf, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, regionCount, regions);
 
     VkImageMemoryBarrier toColor{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     toColor.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -1255,8 +1437,155 @@ void OpenXrTheater::Impl::UploadQuadRegions(const VkBufferImageCopy* regions, u3
     vkQueueSubmit(vkQueue, 1, &si, cmdFence);
 
     XrSwapchainImageReleaseInfo ri{XR_TYPE_SWAPCHAIN_IMAGE_RELEASE_INFO};
-    xrReleaseSwapchainImage(quadSwapchain, &ri);
-    hasQuadFrame = true;
+    xrReleaseSwapchainImage(sc, &ri);
+    return true;
+}
+
+bool OpenXrTheater::Impl::CreateMenuSwapchain() {
+    const VkDeviceSize bufSize = VkDeviceSize(kMenuW) * kMenuH * 4;
+    VkBufferCreateInfo bci{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bci.size = bufSize;
+    bci.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    bci.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+    if (vkCreateBuffer(vkDevice, &bci, nullptr, &menuBuf) != VK_SUCCESS) return false;
+    VkMemoryRequirements memReqs{};
+    vkGetBufferMemoryRequirements(vkDevice, menuBuf, &memReqs);
+    const u32 memIdx = FindMemoryType(vkPhys, memReqs.memoryTypeBits,
+                                      VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+    if (memIdx == UINT32_MAX) return false;
+    VkMemoryAllocateInfo mai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    mai.allocationSize = memReqs.size;
+    mai.memoryTypeIndex = memIdx;
+    if (vkAllocateMemory(vkDevice, &mai, nullptr, &menuMem) != VK_SUCCESS) return false;
+    if (vkBindBufferMemory(vkDevice, menuBuf, menuMem, 0) != VK_SUCCESS) return false;
+    if (vkMapMemory(vkDevice, menuMem, 0, bufSize, 0, &menuMapped) != VK_SUCCESS) return false;
+
+    XrSwapchainCreateInfo sci{XR_TYPE_SWAPCHAIN_CREATE_INFO};
+    sci.usageFlags = XR_SWAPCHAIN_USAGE_COLOR_ATTACHMENT_BIT | XR_SWAPCHAIN_USAGE_SAMPLED_BIT |
+                     XR_SWAPCHAIN_USAGE_TRANSFER_DST_BIT;
+    sci.format = swapFormat;
+    sci.sampleCount = 1;
+    sci.width = kMenuW;
+    sci.height = kMenuH;
+    sci.faceCount = 1;
+    sci.arraySize = 1;
+    sci.mipCount = 1;
+    if (XR_FAILED(xrCreateSwapchain(session, &sci, &menuSwapchain))) return false;
+    u32 n = 0;
+    xrEnumerateSwapchainImages(menuSwapchain, 0, &n, nullptr);
+    menuImages.assign(n, {XR_TYPE_SWAPCHAIN_IMAGE_VULKAN_KHR});
+    xrEnumerateSwapchainImages(menuSwapchain, n, &n, reinterpret_cast<XrSwapchainImageBaseHeader*>(menuImages.data()));
+    return true;
+}
+
+void OpenXrTheater::Impl::DrawMenu() {
+    std::vector<u8> img(size_t(kMenuW) * kMenuH * 4, 0);
+    constexpr int kBand = 190;
+    MenuFill(img, 0, 0, kMenuW, kMenuH, 0xF5C842FFu);                    // yellow border
+    MenuFill(img, 6, 6, kMenuW - 12, kMenuH - 12, 0x0B1620FFu);          // dark panel
+    MenuFill(img, 6, 6, kMenuW - 12, kBand, 0x0E3A48FFu);                // header band (the logo's teal)
+    if (logoW && logoH) {   // bilinear fit into the band
+        const float sc = std::min(float(kMenuW - 40) / logoW, float(kBand - 16) / logoH);
+        const int dw = int(logoW * sc), dh = int(logoH * sc);
+        const int ox = (int(kMenuW) - dw) / 2, oy = 6 + (kBand - dh) / 2;
+        for (int y = 0; y < dh; ++y) {
+            const float fy = std::clamp((y + 0.5f) / sc - 0.5f, 0.0f, float(logoH - 1));
+            const int y0 = int(fy), y1 = std::min<int>(y0 + 1, logoH - 1);
+            const float ty = fy - y0;
+            for (int x = 0; x < dw; ++x) {
+                const float fx = std::clamp((x + 0.5f) / sc - 0.5f, 0.0f, float(logoW - 1));
+                const int x0 = int(fx), x1 = std::min<int>(x0 + 1, logoW - 1);
+                const float tx = fx - x0;
+                u8* d = &img[(size_t(oy + y) * kMenuW + ox + x) * 4];
+                for (int c = 0; c < 4; ++c) {
+                    auto at = [&](int xx, int yy) { return float(logo[(size_t(yy) * logoW + xx) * 4 + c]); };
+                    const float v = (at(x0, y0) * (1 - tx) + at(x1, y0) * tx) * (1 - ty) +
+                                    (at(x0, y1) * (1 - tx) + at(x1, y1) * tx) * ty;
+                    d[c] = u8(std::clamp(v + 0.5f, 0.0f, 255.0f));
+                }
+                d[3] = 255;
+            }
+        }
+    } else {
+        MenuText(img, (kMenuW - MenuTextWidth("FUTURAMA", 12)) / 2, 6 + (kBand - 84) / 2, 12, 0xF5C842FFu, "FUTURAMA");
+    }
+
+    const char* labels[kMenuCount] = {"RESUME", "BACKGROUND", "3D", "ASPECT", "RECENTER SCREEN",
+                                      "RESET SCREEN SIZE", "EXIT GAME"};
+    const char* values[kMenuCount] = {"", darkMode ? "DARK ROOM" : "MIXED REALITY", stereoState ? "ON" : "OFF",
+                                      aspect43 ? "4:3" : "16:9", "", "", exitArmed ? "PRESS A AGAIN" : ""};
+    if (!passthroughLayer) values[kMenuBackground] = "DARK ROOM";
+    const int top = kBand + 6 + 22;
+    for (int i = 0; i < kMenuCount; ++i) {
+        const int y = top + i * 54;
+        const bool sel = i == menuSel;
+        if (sel) MenuFill(img, 20, y - 8, kMenuW - 40, 50, 0xF5C842FFu);
+        const u32 fg = sel ? 0x0B1620FFu : 0xFFFFFFFFu;
+        MenuText(img, 44, y, 5, fg, labels[i]);
+        if (values[i][0]) {
+            char v[64];
+            if (i == kMenuExit) std::snprintf(v, sizeof v, "%s", values[i]);
+            else std::snprintf(v, sizeof v, "- %s +", values[i]);
+            MenuText(img, kMenuW - 44 - MenuTextWidth(v, 4), y + 4, 4, sel ? 0x0B1620FFu : 0x8FE3F0FFu, v);
+        }
+    }
+    if (aspect43 != startupAspect43)
+        MenuText(img, 44, kMenuH - 92, 4, 0xF5C842FFu, "ASPECT CHANGES AFTER A RESTART");
+    MenuText(img, 44, kMenuH - 44, 3, 0xB8C4E0FFu, "STICK: CHANGE  A: OK  B: CLOSE  GRIPS: MOVE");
+    std::memcpy(menuMapped, img.data(), img.size());
+}
+
+// Up/down select, left/right (or A) change, B or a Menu tap closes. Edge-triggered.
+void OpenXrTheater::Impl::MenuInput(bool up, bool down, bool left, bool right, bool a, bool b) {
+    const bool now[6] = {up, down, left, right, a, b};
+    bool edge[6];
+    for (int i = 0; i < 6; ++i) edge[i] = now[i] && !prevNav[i], prevNav[i] = now[i];
+    if (edge[0]) menuSel = (menuSel + kMenuCount - 1) % kMenuCount, exitArmed = false, menuDirty = true;
+    if (edge[1]) menuSel = (menuSel + 1) % kMenuCount, exitArmed = false, menuDirty = true;
+    if (edge[2]) MenuActivate(-1);
+    if (edge[3]) MenuActivate(+1);
+    if (edge[4]) MenuActivate(0);
+    if (edge[5]) SetMenuOpen(false);
+}
+
+void OpenXrTheater::Impl::MenuActivate(int dir) {
+    menuDirty = true;
+    switch (menuSel) {
+    case kMenuResume:
+        if (dir == 0) SetMenuOpen(false);
+        break;
+    case kMenuBackground:
+        if (!passthroughLayer) break;
+        darkMode = !darkMode;
+        ApplyBackground();
+        SaveView();
+        break;
+    case kMenu3D:
+        stereoTogglePending = true;   // GameMain flips it and reports back through SetStereoState
+        break;
+    case kMenuAspect:
+        aspect43 = !aspect43;
+        SaveView();
+        break;
+    case kMenuRecenter:
+        if (dir == 0) recenterPending = true;
+        break;
+    case kMenuResetSize:
+        if (dir == 0) {
+            viewDist = kDefaultDist;
+            viewHeight = kDefaultHeight;
+            viewElev = 0.0f;
+            UpdateQuadSize();
+            recenterPending = true;
+            SaveView();
+        }
+        break;
+    case kMenuExit:
+        if (dir != 0) break;
+        if (exitArmed) exitRequested = true;
+        else exitArmed = true;
+        break;
+    }
 }
 
 void OpenXrTheater::PresentFrame(const void* rgba, u32 width, u32 height) {
@@ -1304,6 +1633,23 @@ void OpenXrTheater::EndFrame() {
     Impl& d = *impl_;
     if (!d.frameActive) return;
     d.frameActive = false;
+
+    const bool showMenu = d.menuOpen && d.menuSwapchain && d.frameState.shouldRender;
+    if (showMenu && d.menuDirty) {
+        d.menuDirty = false;
+        vkWaitForFences(d.vkDevice, 1, &d.cmdFence, VK_TRUE, UINT64_MAX);
+        vkResetFences(d.vkDevice, 1, &d.cmdFence);
+        d.DrawMenu();
+        VkBufferImageCopy region{};
+        region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        region.imageExtent = {kMenuW, kMenuH, 1};
+        if (!d.UploadRegions(d.menuSwapchain, d.menuImages, d.menuBuf, &region, 1)) {
+            d.menuDirty = true;
+            // (no submit happened: re-signal the fence so the next wait does not hang)
+            VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
+            vkQueueSubmit(d.vkQueue, 1, &si, d.cmdFence);
+        }
+    }
 
     std::vector<const XrCompositionLayerBaseHeader*> layers;
     XrCompositionLayerPassthroughFB passthroughComp{XR_TYPE_COMPOSITION_LAYER_PASSTHROUGH_FB};
@@ -1419,6 +1765,20 @@ void OpenXrTheater::EndFrame() {
         }
     }
 
+    XrCompositionLayerQuad menuLayer{XR_TYPE_COMPOSITION_LAYER_QUAD};
+    if (showMenu) {
+        const XrVector3f normal = Rotate(d.quadPose.orientation, V3(0.0f, 0.0f, 1.0f));
+        menuLayer.layerFlags = 0;
+        menuLayer.space = d.localSpace;
+        menuLayer.eyeVisibility = XR_EYE_VISIBILITY_BOTH;
+        menuLayer.subImage.swapchain = d.menuSwapchain;
+        menuLayer.subImage.imageRect = {{0, 0}, {int32_t(kMenuW), int32_t(kMenuH)}};
+        menuLayer.pose = {d.quadPose.orientation, Add(d.quadPose.position, Mul(normal, 0.25f))};
+        const float mh = std::clamp(d.viewHeight * 0.75f, 0.45f, 2.4f);
+        menuLayer.size = {mh * float(kMenuW) / float(kMenuH), mh};
+        layers.push_back(reinterpret_cast<const XrCompositionLayerBaseHeader*>(&menuLayer));
+    }
+
     XrFrameEndInfo fei{XR_TYPE_FRAME_END_INFO};
     fei.displayTime = d.frameState.predictedDisplayTime;
     fei.environmentBlendMode = XR_ENVIRONMENT_BLEND_MODE_OPAQUE;
@@ -1495,6 +1855,39 @@ void OpenXrTheater::SetHaptics(u16 left, u16 right) {
 }
 
 void OpenXrTheater::Recenter() { impl_->recenterPending = true; }
+
+bool OpenXrTheater::MenuOpen() const { return impl_->menuOpen; }
+
+bool OpenXrTheater::ConsumeExitRequest() {
+    const bool r = impl_->exitRequested;
+    impl_->exitRequested = false;
+    return r;
+}
+
+void OpenXrTheater::SetMenuLogo(const u8* rgba, u32 width, u32 height) {
+    Impl& d = *impl_;
+    if (!rgba || !width || !height) return;
+    d.logo.assign(rgba, rgba + size_t(width) * height * 4);
+    d.logoW = width;
+    d.logoH = height;
+    d.menuDirty = true;
+}
+
+void OpenXrTheater::SetStereoState(bool stereo) {
+    Impl& d = *impl_;
+    if (d.stereoState == stereo) return;
+    d.stereoState = stereo;
+    d.menuDirty = true;
+    d.SaveView();
+}
+
+bool OpenXrTheater::LoadStartupPrefs(bool& stereo, bool& aspect43) {
+    SavedView v;
+    if (!ReadSavedView(PrefsPath(), v)) return false;
+    stereo = v.stereo != 0;
+    aspect43 = v.aspect43 != 0;
+    return true;
+}
 
 }  // namespace fut::platform
 

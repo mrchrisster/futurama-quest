@@ -54,6 +54,7 @@ public:
     explicit SdlSoundBackend(const Options& options);
     ~SdlSoundBackend() override;
     bool Init();                                     // false without an audio device
+    void SetPaused(bool paused);                     // (port, Quest VR menu) pauses / resumes the output device
     bool InitOffline();                              // without a device (RenderFrames)
     // Game data the hardware path needs: default.xbe (the HRTF tables, the GP executive, the EP coefficients) and
     // xbox/dsstdfx.bin (the DSP effects; effect 0's state for the reverb conversion). Both before the sound system

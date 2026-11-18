@@ -218,6 +218,13 @@ SdlSoundBackend::~SdlSoundBackend() {
     if (d.audioInit) SDL_QuitSubSystem(SDL_INIT_AUDIO);
 }
 
+void SdlSoundBackend::SetPaused(bool paused) {
+    Impl& d = *impl_;
+    if (!d.out) return;
+    if (paused) SDL_PauseAudioStreamDevice(d.out);
+    else SDL_ResumeAudioStreamDevice(d.out);
+}
+
 bool SdlSoundBackend::Init() {
     Impl& d = *impl_;
     if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
